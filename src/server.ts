@@ -19,8 +19,20 @@ const battleQueue = createBattleQueue({
   },
 });
 
-const app = buildApp({
+const app = await buildApp({
+  prisma,
   logger: { level: env.LOG_LEVEL },
+  trustProxy: env.TRUST_PROXY,
+  auth: {
+    cookieName: env.SESSION_COOKIE_NAME,
+    cookieSecure: env.COOKIE_SECURE,
+    sessionTtlHours: env.SESSION_TTL_HOURS,
+    loginRateLimit: { max: env.LOGIN_RATE_MAX, windowMs: env.LOGIN_RATE_WINDOW_SEC * 1000 },
+    registerRateLimit: {
+      max: env.REGISTER_RATE_MAX,
+      windowMs: env.REGISTER_RATE_WINDOW_SEC * 1000,
+    },
+  },
   health: {
     pingDatabase: async () => {
       await prisma.$queryRaw`SELECT 1`;

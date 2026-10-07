@@ -1,5 +1,8 @@
 import { z } from "zod";
 
+/** "true" / "false", as environment variables spell booleans. */
+const flag = z.enum(["true", "false"]).transform((value) => value === "true");
+
 const serverEnvSchema = z.object({
   DATABASE_URL: z.url(),
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
@@ -16,6 +19,15 @@ const serverEnvSchema = z.object({
     )
     .refine((brokers) => brokers.length > 0, "at least one broker is required"),
   KAFKA_BATTLE_TOPIC: z.string().min(1).default("battle.resolve"),
+
+  SESSION_COOKIE_NAME: z.string().min(1).default("sid"),
+  SESSION_TTL_HOURS: z.coerce.number().positive().default(720),
+  COOKIE_SECURE: flag.default(false),
+  TRUST_PROXY: flag.default(false),
+  LOGIN_RATE_MAX: z.coerce.number().int().positive().default(10),
+  LOGIN_RATE_WINDOW_SEC: z.coerce.number().int().positive().default(300),
+  REGISTER_RATE_MAX: z.coerce.number().int().positive().default(10),
+  REGISTER_RATE_WINDOW_SEC: z.coerce.number().int().positive().default(3600),
 });
 
 const seedEnvSchema = z.object({

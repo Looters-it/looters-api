@@ -1,19 +1,71 @@
+import cookie from "@fastify/cookie";
+import type { PrismaClient } from "@prisma/client";
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastify";
+import { createAuthGuard } from "./auth/guard.js";
+import { RateLimiter, type RateLimitRule } from "./auth/rate-limit.js";
+import { SessionService } from "./auth/sessions.js";
+import { registerErrorHandling } from "./http/errors.js";
+import { registerAdminRoutes } from "./modules/admin/routes.js";
+import { registerAuthRoutes } from "./modules/auth/routes.js";
 import { registerHealthRoutes, type HealthDeps } from "./modules/health/routes.js";
+import { registerStatsRoutes } from "./modules/stats/routes.js";
+import { RealtimeHub } from "./realtime/hub.js";
+import { registerWebSocket } from "./realtime/ws.js";
+
+export interface AuthConfig {
+  cookieName: string;
+  cookieSecure: boolean;
+  sessionTtlHours: number;
+  loginRateLimit: RateLimitRule;
+  registerRateLimit: RateLimitRule;
+}
+
+export const DEFAULT_AUTH_CONFIG: AuthConfig = {
+  cookieName: "sid",
+  cookieSecure: false,
+  sessionTtlHours: 720,
+  loginRateLimit: { max: 10, windowMs: 5 * 60_000 },
+  registerRateLimit: { max: 10, windowMs: 60 * 60_000 },
+};
 
 export interface AppDeps {
+  prisma: PrismaClient;
   health: HealthDeps;
+  auth?: Partial<AuthConfig>;
   logger?: FastifyServerOptions["logger"];
+  /** True behind the web proxy, so that the client address is read from X-Forwarded-For. */
+  trustProxy?: boolean;
 }
 
 /** Builds the HTTP application without starting it, so tests can inject requests. */
-export function buildApp(deps: AppDeps): FastifyInstance {
-  const app = Fastify({ logger: deps.logger ?? false });
+export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
+  const auth = { ...DEFAULT_AUTH_CONFIG, ...deps.auth };
+  const app = Fastify({ logger: deps.logger ?? false, trustProxy: deps.trustProxy ?? false });
 
-  app.setNotFoundHandler((_request, reply) =>
-    reply.code(404).send({ error: { code: "NOT_FOUND", message: "Route not found" } }),
-  );
+  registerErrorHandling(app);
+  await app.register(cookie);
+
+  const hub = new RealtimeHub();
+  const sessions = new SessionService(deps.prisma, auth.sessionTtlHours * 3_600_000);
+  sessions.onRevoked = (sessionId) => {
+    hub.closeSession(sessionId);
+  };
+  const guard = createAuthGuard(sessions, auth.cookieName);
 
   registerHealthRoutes(app, deps.health);
+  registerAuthRoutes(app, {
+    prisma: deps.prisma,
+    sessions,
+    guard,
+    cookie: { name: auth.cookieName, secure: auth.cookieSecure },
+    limits: {
+      login: new RateLimiter(auth.loginRateLimit),
+      register: new RateLimiter(auth.registerRateLimit),
+    },
+  });
+  registerAdminRoutes(app, { sessions, guard, hub });
+  registerStatsRoutes(app, hub);
+  await registerWebSocket(app, hub, guard);
+
   return app;
 }

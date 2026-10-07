@@ -19,7 +19,10 @@ export async function seedAdmin(
   credentials: AdminCredentials,
 ): Promise<SeedAdminResult> {
   const { username, email, password } = credentials;
-  const existing = await prisma.user.findUnique({ where: { username } });
+  // Usernames are unique regardless of case.
+  const existing = await prisma.user.findFirst({
+    where: { username: { equals: username, mode: "insensitive" } },
+  });
   if (existing && existing.role !== "ADMIN") {
     throw new Error(
       `Username "${username}" already belongs to a normal user: choose another ADMIN_USERNAME`,
@@ -28,7 +31,10 @@ export async function seedAdmin(
 
   const passwordHash = await hashPassword(password);
   if (existing) {
-    await prisma.user.update({ where: { id: existing.id }, data: { email, passwordHash } });
+    await prisma.user.update({
+      where: { id: existing.id },
+      data: { username, email, passwordHash },
+    });
     return "updated";
   }
   await prisma.user.create({ data: { username, email, passwordHash, role: "ADMIN" } });
