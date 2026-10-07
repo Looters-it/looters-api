@@ -1,0 +1,52 @@
+import { z } from "zod";
+
+const serverEnvSchema = z.object({
+  DATABASE_URL: z.url(),
+  PORT: z.coerce.number().int().min(1).max(65535).default(3000),
+  HOST: z.string().default("0.0.0.0"),
+  LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).default("info"),
+  UPLOAD_DIR: z.string().default("./uploads"),
+  KAFKA_BROKERS: z
+    .string()
+    .transform((value) =>
+      value
+        .split(",")
+        .map((broker) => broker.trim())
+        .filter(Boolean),
+    )
+    .refine((brokers) => brokers.length > 0, "at least one broker is required"),
+  KAFKA_BATTLE_TOPIC: z.string().min(1).default("battle.resolve"),
+});
+
+const seedEnvSchema = z.object({
+  DATABASE_URL: z.url(),
+  ADMIN_USERNAME: z
+    .string()
+    .min(3)
+    .max(32)
+    .regex(/^[A-Za-z0-9_]+$/, "only letters, digits and underscore"),
+  ADMIN_PASSWORD: z.string().min(12, "must be at least 12 characters"),
+  ADMIN_EMAIL: z.email(),
+});
+
+export type ServerEnv = z.infer<typeof serverEnvSchema>;
+export type SeedEnv = z.infer<typeof seedEnvSchema>;
+
+function parse<T>(schema: z.ZodType<T>, source: NodeJS.ProcessEnv): T {
+  const result = schema.safeParse(source);
+  if (!result.success) {
+    const details = result.error.issues
+      .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
+      .join("; ");
+    throw new Error(`Invalid environment: ${details}`);
+  }
+  return result.data;
+}
+
+export function loadServerEnv(source: NodeJS.ProcessEnv = process.env): ServerEnv {
+  return parse(serverEnvSchema, source);
+}
+
+export function loadSeedEnv(source: NodeJS.ProcessEnv = process.env): SeedEnv {
+  return parse(seedEnvSchema, source);
+}

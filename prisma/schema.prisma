@@ -1,0 +1,473 @@
+// Authoritative data model. Geometry columns are read and written with raw SQL.
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+  binaryTargets   = ["native", "linux-musl-openssl-3.0.x", "linux-musl-arm64-openssl-3.0.x"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [postgis]
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum GeoAreaKind {
+  FOLDER
+  DATASET
+}
+
+enum GeoFormat {
+  KML
+  GEOJSON
+}
+
+enum UploadStatus {
+  PENDING
+  PROCESSING
+  DONE
+  FAILED
+}
+
+enum MatchStatus {
+  DRAFT
+  OPEN
+  RUNNING
+  FINISHED
+}
+
+enum EmpireStatus {
+  ACTIVE
+  FALLEN
+}
+
+enum AllocationMode {
+  EQUAL
+  WEIGHTED
+}
+
+enum BattleStatus {
+  OPEN
+  RESOLVED
+}
+
+enum BattleResponse {
+  DEFEND
+  SURRENDER
+}
+
+enum BattleOutcome {
+  ATTACKER_WON
+  DEFENDER_WON
+  SURRENDER
+}
+
+enum AllianceInviteStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+}
+
+enum JobStatus {
+  PENDING
+  RUNNING
+  DONE
+  FAILED
+}
+
+// ---------- Users ----------
+
+model User {
+  id           String    @id @default(cuid())
+  username     String    @unique
+  // Not unique on purpose: several users may share one email.
+  email        String
+  passwordHash String
+  role         Role      @default(USER)
+  createdAt    DateTime  @default(now())
+  sessions     Session[]
+  empires      Empire[]
+  matches      Match[]
+
+  @@index([email])
+}
+
+model Session {
+  id         String    @id @default(cuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Only the hash of the cookie token is stored.
+  tokenHash  String    @unique
+  userAgent  String?
+  ip         String?
+  createdAt  DateTime  @default(now())
+  lastSeenAt DateTime  @default(now())
+  expiresAt  DateTime
+  revokedAt  DateTime?
+
+  @@index([userId])
+}
+
+// ---------- Geography ----------
+
+model GeoArea {
+  id        String      @id @default(cuid())
+  name      String
+  kind      GeoAreaKind @default(FOLDER)
+  parentId  String?
+  parent    GeoArea?    @relation("tree", fields: [parentId], references: [id], onDelete: Cascade)
+  children  GeoArea[]   @relation("tree")
+  uploads   GeoUpload[]
+  units     GeoUnit[]
+  matches   MatchArea[]
+  createdAt DateTime    @default(now())
+
+  @@index([parentId])
+}
+
+model GeoUpload {
+  id          String       @id @default(cuid())
+  areaId      String
+  area        GeoArea      @relation(fields: [areaId], references: [id], onDelete: Cascade)
+  filename    String
+  format      GeoFormat
+  storagePath String
+  status      UploadStatus @default(PENDING)
+  progress    Int          @default(0)
+  unitCount   Int          @default(0)
+  error       String?
+  createdAt   DateTime     @default(now())
+  units       GeoUnit[]
+
+  @@index([areaId])
+}
+
+// A real municipality. Never owned: ownership lives on Territory.
+model GeoUnit {
+  id          Int                                        @id @default(autoincrement())
+  areaId      String
+  area        GeoArea                                    @relation(fields: [areaId], references: [id], onDelete: Cascade)
+  uploadId    String
+  upload      GeoUpload                                  @relation(fields: [uploadId], references: [id], onDelete: Cascade)
+  name        String
+  code        String?
+  centroidLon Float
+  centroidLat Float
+  areaKm2     Float
+  geom        Unsupported("geometry(MultiPolygon,4326)")
+  geomSimple  Unsupported("geometry(MultiPolygon,4326)")
+  territories TerritoryUnit[]
+  adjacentA   GeoAdjacency[]                             @relation("adjA")
+  adjacentB   GeoAdjacency[]                             @relation("adjB")
+
+  @@index([areaId])
+  @@index([uploadId])
+  @@index([geom], type: Gist)
+}
+
+// Undirected: one row per pair, aId < bId (CHECK constraint in the migration).
+model GeoAdjacency {
+  aId    Int
+  a      GeoUnit @relation("adjA", fields: [aId], references: [id], onDelete: Cascade)
+  bId    Int
+  b      GeoUnit @relation("adjB", fields: [bId], references: [id], onDelete: Cascade)
+  manual Boolean @default(false)
+
+  @@id([aId, bId])
+  @@index([bId])
+}
+
+// ---------- Match ----------
+
+model Match {
+  id             String         @id @default(cuid())
+  name           String
+  ownerId        String
+  owner          User           @relation(fields: [ownerId], references: [id])
+  status         MatchStatus    @default(DRAFT)
+  startAt        DateTime
+  maxDays        Int?
+  maxPlayers     Int            @default(100)
+  turnHours      Float          @default(24)
+  currentTurn    Int            @default(0)
+  turnEndsAt     DateTime?
+  inviteCode     String?
+  // Full rules configuration, materialised at creation (see src/rules/config.ts).
+  config         Json
+  winnerEmpireId String?
+  createdAt      DateTime       @default(now())
+  finishedAt     DateTime?
+  areas          MatchArea[]
+  empires        Empire[]
+  territories    Territory[]
+  battles        Battle[]
+  structures     Structure[]
+  alliances      Alliance[]
+  events         GameEvent[]
+  snapshots      TurnSnapshot[]
+
+  @@index([status])
+}
+
+model MatchArea {
+  matchId String
+  match   Match   @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  areaId  String
+  area    GeoArea @relation(fields: [areaId], references: [id])
+
+  @@id([matchId, areaId])
+}
+
+model Empire {
+  id                  String          @id @default(cuid())
+  matchId             String
+  match               Match           @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  userId              String
+  user                User            @relation(fields: [userId], references: [id])
+  name                String
+  color               String
+  emblem              String
+  motto               String?
+  status              EmpireStatus    @default(ACTIVE)
+  allocationMode      AllocationMode  @default(EQUAL)
+  capitalTerritoryId  String?         @unique
+  annexedThisTurn     Int             @default(0)
+  lastCapitalMoveTurn Int?
+  joinedAt            DateTime        @default(now())
+  fallenTurn          Int?
+  territories         Territory[]
+  structures          Structure[]
+  allianceMembership  AllianceMember?
+
+  @@unique([matchId, userId])
+  @@unique([matchId, name])
+  @@unique([matchId, color])
+}
+
+// A game territory inside one match: one or more GeoUnits (several after a merge).
+// Ownership, resources, battles and structures refer to it, never to GeoUnit.
+// Match adjacency is derived: TerritoryUnit -> GeoAdjacency -> TerritoryUnit.
+model Territory {
+  id                    String          @id @default(cuid())
+  matchId               String
+  match                 Match           @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  name                  String
+  ownerEmpireId         String?
+  owner                 Empire?         @relation(fields: [ownerEmpireId], references: [id])
+  // Real amount. For a free territory this is its hidden endowment. Never negative (CHECK).
+  resources             Int             @default(0)
+  weight                Int             @default(1)
+  isArea                Boolean         @default(false)
+  protectedUntilTurn    Int?
+  aboveAlertAtLastClose Boolean         @default(false)
+  alert                 Boolean         @default(false)
+  units                 TerritoryUnit[]
+  structures            Structure[]
+  battleLock            BattleLock?
+
+  @@index([matchId])
+  @@index([ownerEmpireId])
+}
+
+model TerritoryUnit {
+  matchId     String
+  territoryId String
+  territory   Territory @relation(fields: [territoryId], references: [id], onDelete: Cascade)
+  geoUnitId   Int
+  geoUnit     GeoUnit   @relation(fields: [geoUnitId], references: [id])
+
+  @@id([matchId, geoUnitId])
+  @@index([territoryId])
+  @@index([geoUnitId])
+}
+
+// ---------- Battles ----------
+
+model Battle {
+  id                String          @id @default(cuid())
+  matchId           String
+  match             Match           @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  turn              Int
+  attackerEmpireId  String
+  defenderEmpireId  String
+  targetTerritoryId String
+  status            BattleStatus    @default(OPEN)
+  // Set by api when the defender answers; resolution itself always happens in jobs.
+  response          BattleResponse?
+  respondedAt       DateTime?
+  outcome           BattleOutcome?
+  // Name of the resolver that produced the outcome, so the formula can change.
+  resolver          String?
+  attackPct         Int
+  attackCost        Int
+  attackForce       Int
+  defenseCost       Int?
+  defenseForce      Int?
+  rollAttack        Float?
+  rollDefense       Float?
+  createdAt         DateTime        @default(now())
+  resolvedAt        DateTime?
+  sources           BattleSource[]
+  locks             BattleLock[]
+
+  @@index([matchId, status])
+  @@index([targetTerritoryId])
+}
+
+model BattleSource {
+  battleId               String
+  battle                 Battle @relation(fields: [battleId], references: [id], onDelete: Cascade)
+  territoryId            String
+  cost                   Int
+  resourcesAtDeclaration Int
+
+  @@id([battleId, territoryId])
+  @@index([territoryId])
+}
+
+// One row per territory involved in an open battle (target and every source),
+// deleted at resolution. The primary key is the database-level guarantee that
+// a territory is in at most one open battle.
+model BattleLock {
+  territoryId String    @id
+  territory   Territory @relation(fields: [territoryId], references: [id], onDelete: Cascade)
+  battleId    String
+  battle      Battle    @relation(fields: [battleId], references: [id], onDelete: Cascade)
+
+  @@index([battleId])
+}
+
+// ---------- Structures ----------
+
+// `type` is a key of the structure catalogue (code), not an enum: adding a
+// structure needs no migration. Type-specific state goes in `data`.
+model Structure {
+  id                String    @id @default(cuid())
+  matchId           String
+  match             Match     @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  territoryId       String
+  territory         Territory @relation(fields: [territoryId], references: [id], onDelete: Cascade)
+  empireId          String
+  empire            Empire    @relation(fields: [empireId], references: [id], onDelete: Cascade)
+  type              String
+  builtTurn         Int
+  expiresTurn       Int?
+  active            Boolean   @default(true)
+  cooldownUntilTurn Int?
+  data              Json      @default("{}")
+
+  @@index([matchId, type])
+  @@index([territoryId])
+  @@index([empireId])
+}
+
+// ---------- Alliances ----------
+
+model Alliance {
+  id          String            @id @default(cuid())
+  matchId     String
+  match       Match             @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  createdTurn Int
+  createdAt   DateTime          @default(now())
+  dissolvedAt DateTime?
+  members     AllianceMember[]
+  invites     AllianceInvite[]
+  messages    AllianceMessage[]
+
+  @@index([matchId])
+}
+
+// empireId is the primary key: an empire is in at most one alliance.
+model AllianceMember {
+  empireId     String   @id
+  empire       Empire   @relation(fields: [empireId], references: [id], onDelete: Cascade)
+  allianceId   String
+  alliance     Alliance @relation(fields: [allianceId], references: [id], onDelete: Cascade)
+  joinedTurn   Int
+  // Set when the empire announces it is leaving; the row is removed at that turn's close.
+  leavesAtTurn Int?
+
+  @@index([allianceId])
+}
+
+model AllianceInvite {
+  id           String               @id @default(cuid())
+  matchId      String
+  // Null while the proposal would found a new alliance.
+  allianceId   String?
+  alliance     Alliance?            @relation(fields: [allianceId], references: [id], onDelete: Cascade)
+  fromEmpireId String
+  toEmpireId   String
+  status       AllianceInviteStatus @default(PENDING)
+  createdAt    DateTime             @default(now())
+  respondedAt  DateTime?
+
+  @@index([matchId])
+  @@index([toEmpireId, status])
+}
+
+model AllianceMessage {
+  id         String   @id @default(cuid())
+  allianceId String
+  alliance   Alliance @relation(fields: [allianceId], references: [id], onDelete: Cascade)
+  empireId   String
+  text       String
+  createdAt  DateTime @default(now())
+
+  @@index([allianceId, createdAt])
+}
+
+// ---------- Events and history ----------
+
+// Append-only log of typed domain events: feeds the board, the per-turn
+// history and the map replay. `data` holds ids and names only, never amounts.
+model GameEvent {
+  id          String    @id @default(cuid())
+  matchId     String
+  match       Match     @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  turn        Int
+  type        String
+  empireId    String?
+  territoryId String?
+  isPublic    Boolean   @default(true)
+  data        Json      @default("{}")
+  removedAt   DateTime?
+  removedById String?
+  createdAt   DateTime  @default(now())
+
+  @@index([matchId, createdAt])
+  @@index([matchId, turn])
+}
+
+model TurnSnapshot {
+  matchId   String
+  match     Match    @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  turn      Int
+  ownership Json
+  createdAt DateTime @default(now())
+
+  @@id([matchId, turn])
+}
+
+// ---------- Queue between api and jobs ----------
+
+model Job {
+  id         String    @id @default(cuid())
+  type       String
+  payload    Json
+  status     JobStatus @default(PENDING)
+  runAt      DateTime  @default(now())
+  attempts   Int       @default(0)
+  lockedAt   DateTime?
+  lastError  String?
+  // Optional idempotency key: the same job cannot be enqueued twice.
+  dedupeKey  String?   @unique
+  createdAt  DateTime  @default(now())
+  finishedAt DateTime?
+
+  @@index([status, runAt])
+}
