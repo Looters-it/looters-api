@@ -23,6 +23,7 @@ const app = await buildApp({
   prisma,
   logger: { level: env.LOG_LEVEL },
   trustProxy: env.TRUST_PROXY,
+  uploads: { dir: env.UPLOAD_DIR, maxMegabytes: env.UPLOAD_MAX_MB },
   auth: {
     cookieName: env.SESSION_COOKIE_NAME,
     cookieSecure: env.COOKIE_SECURE,

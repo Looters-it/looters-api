@@ -9,6 +9,7 @@ const serverEnvSchema = z.object({
   HOST: z.string().default("0.0.0.0"),
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).default("info"),
   UPLOAD_DIR: z.string().default("./uploads"),
+  UPLOAD_MAX_MB: z.coerce.number().int().positive().default(300),
   KAFKA_BROKERS: z
     .string()
     .transform((value) =>

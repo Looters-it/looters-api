@@ -16,11 +16,6 @@ enum Role {
   ADMIN
 }
 
-enum GeoAreaKind {
-  FOLDER
-  DATASET
-}
-
 enum GeoFormat {
   KML
   GEOJSON
@@ -114,10 +109,11 @@ model Session {
 
 // ---------- Geography ----------
 
+// A node of the admin's folder tree. A root is a geographic area (Italy, France…),
+// its descendants are folders that split it (North, Lombardy…).
 model GeoArea {
   id        String      @id @default(cuid())
   name      String
-  kind      GeoAreaKind @default(FOLDER)
   parentId  String?
   parent    GeoArea?    @relation("tree", fields: [parentId], references: [id], onDelete: Cascade)
   children  GeoArea[]   @relation("tree")
@@ -130,18 +126,21 @@ model GeoArea {
 }
 
 model GeoUpload {
-  id          String       @id @default(cuid())
-  areaId      String
-  area        GeoArea      @relation(fields: [areaId], references: [id], onDelete: Cascade)
-  filename    String
-  format      GeoFormat
-  storagePath String
-  status      UploadStatus @default(PENDING)
-  progress    Int          @default(0)
-  unitCount   Int          @default(0)
-  error       String?
-  createdAt   DateTime     @default(now())
-  units       GeoUnit[]
+  id             String       @id @default(cuid())
+  areaId         String
+  area           GeoArea      @relation(fields: [areaId], references: [id], onDelete: Cascade)
+  filename       String
+  format         GeoFormat
+  storagePath    String
+  status         UploadStatus @default(PENDING)
+  progress       Int          @default(0)
+  unitCount      Int          @default(0)
+  error          String?
+  sizeBytes      Int          @default(0)
+  adjacencyCount Int          @default(0)
+  createdAt      DateTime     @default(now())
+  finishedAt     DateTime?
+  units          GeoUnit[]
 
   @@index([areaId])
 }

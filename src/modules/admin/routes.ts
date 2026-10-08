@@ -1,3 +1,4 @@
+import type { PrismaClient } from "@prisma/client";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { AuthGuard } from "../../auth/guard.js";
@@ -6,6 +7,7 @@ import { notFound } from "../../http/errors.js";
 import type { RealtimeHub } from "../../realtime/hub.js";
 
 export interface AdminRoutesDeps {
+  prisma: PrismaClient;
   sessions: SessionService;
   guard: AuthGuard;
   hub: RealtimeHub;
@@ -14,7 +16,16 @@ export interface AdminRoutesDeps {
 const sessionParams = z.object({ id: z.string().min(1) });
 
 export function registerAdminRoutes(app: FastifyInstance, deps: AdminRoutesDeps): void {
-  const { sessions, guard, hub } = deps;
+  const { prisma, sessions, guard, hub } = deps;
+
+  app.get("/api/admin/stats", async (request) => {
+    await guard.admin(request);
+    const [users, matchesRunning] = await Promise.all([
+      prisma.user.count({ where: { role: "USER" } }),
+      prisma.match.count({ where: { status: "RUNNING" } }),
+    ]);
+    return { users, matchesRunning, online: hub.onlineCount() };
+  });
 
   // Active sessions; the token hash never leaves the database.
   app.get("/api/admin/sessions", async (request) => {
