@@ -244,6 +244,7 @@ model Empire {
   fallenTurn          Int?
   territories         Territory[]
   structures          Structure[]
+  logo                EmpireLogo?
   alliancesAsA        Alliance[]       @relation("allianceA")
   alliancesAsB        Alliance[]       @relation("allianceB")
 
@@ -253,6 +254,16 @@ model Empire {
 }
 
 // A game territory inside one match: one or more GeoUnits (several after a merge).
+// An image the player uploaded to stand for the empire in place of the emblem.
+// Kept in the database (it is small) so that it travels with backups.
+model EmpireLogo {
+  empireId  String   @id
+  empire    Empire   @relation(fields: [empireId], references: [id], onDelete: Cascade)
+  mime      String
+  data      Bytes
+  updatedAt DateTime @updatedAt
+}
+
 // Ownership, resources, battles and structures refer to it, never to GeoUnit.
 // Match adjacency is derived: TerritoryUnit -> GeoAdjacency -> TerritoryUnit.
 model Territory {

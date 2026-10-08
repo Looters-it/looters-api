@@ -486,10 +486,56 @@ export class MatchService {
   }
 
   /**
-   * Everything the viewer may see of a match. Resources appear only on the
-   * viewer's own territories: for everyone else the field is null, and free
-   * territories are not listed at all, so hidden amounts never leave the server.
+   * Sets the image that stands for the viewer's empire in place of its emblem.
+   * Unlike name and colour it can change during the match: it identifies
+   * nobody by itself and a player may want to fix a bad upload.
    */
+  async setLogo(id: string, logo: { mime: string; data: Buffer }, viewer: AuthContext) {
+    const match = await this.visible(id, viewer);
+    if (match.status === "FINISHED") throw conflict("MATCH_NOT_RUNNING", "The match is over");
+    const empire = await this.prisma.empire.findFirst({
+      where: { matchId: id, userId: viewer.user.id },
+    });
+    if (!empire) throw new AppError(403, "NOT_A_PLAYER", "You have no empire in this match");
+    const stored = { mime: logo.mime, data: new Uint8Array(logo.data) };
+    await this.prisma.empireLogo.upsert({
+      where: { empireId: empire.id },
+      create: { empireId: empire.id, ...stored },
+      update: stored,
+    });
+    this.onChange(id, "empires");
+    return this.state(id, viewer);
+  }
+
+  /**
+   * Removes a logo: the player their own, the owner of the match and the
+   * platform admin anyone's (an image is the one thing a player can show to
+   * everybody without a word being read first).
+   */
+  async removeLogo(id: string, empireId: string, viewer: AuthContext) {
+    const match = await this.visible(id, viewer);
+    const empire = await this.prisma.empire.findFirst({ where: { id: empireId, matchId: id } });
+    if (!empire) throw notFound("Empire");
+    const allowed =
+      empire.userId === viewer.user.id ||
+      match.ownerId === viewer.user.id ||
+      viewer.user.role === "ADMIN";
+    if (!allowed) throw forbidden();
+    await this.prisma.empireLogo.deleteMany({ where: { empireId } });
+    this.onChange(id, "empires");
+    return this.state(id, viewer);
+  }
+
+  /** The image itself: public like the empire it stands for. */
+  async logo(id: string, empireId: string, viewer: Viewer) {
+    await this.visible(id, viewer);
+    const logo = await this.prisma.empireLogo.findFirst({
+      where: { empireId, empire: { matchId: id } },
+    });
+    if (!logo) throw notFound("Logo");
+    return logo;
+  }
+
   /**
    * Everything of a match that its state is made of, the same for every
    * viewer: what each one may see of it is decided afterwards, in memory.
@@ -515,6 +561,7 @@ export class MatchService {
           lastCapitalMoveTurn: true,
           fallenTurn: true,
           user: { select: { username: true } },
+          logo: { select: { updatedAt: true } },
         },
       }),
       this.prisma.territory.findMany({
@@ -700,6 +747,7 @@ export class MatchService {
         ({
           userId: _userId,
           user,
+          logo,
           annexedThisTurn: _annexed,
           allocationMode: _mode,
           lastCapitalMoveTurn: _moved,
@@ -707,6 +755,10 @@ export class MatchService {
         }) => ({
           ...empire,
           username: user.username,
+          /** Where the uploaded logo is, if there is one; it changes when the image does. */
+          logoUrl: logo
+            ? `/api/matches/${id}/empires/${empire.id}/logo?v=${String(logo.updatedAt.getTime())}`
+            : null,
           units: unitsOf(empire.id),
           // Total resources stay hidden for the whole match and are revealed when it
           // ends (PROMPT §9 #10).

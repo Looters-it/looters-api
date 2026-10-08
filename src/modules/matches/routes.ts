@@ -22,6 +22,7 @@ import {
   matchParams,
   updateMatchBody,
 } from "./schemas.js";
+import { LOGO_MAX_BYTES, LOGO_MIME_TYPES, readLogo } from "./logo.js";
 import { MatchService } from "./service.js";
 import { z } from "zod";
 
@@ -31,6 +32,8 @@ export interface MatchRoutesDeps {
   tileCache: TileCache;
   service?: MatchService;
 }
+
+const empireParams = matchParams.extend({ empireId: z.string().min(1) });
 
 const tileParams = tileCoordinates
   .extend({ id: z.string().min(1) })
@@ -87,6 +90,40 @@ export function registerMatchRoutes(app: FastifyInstance, deps: MatchRoutesDeps)
     const { id } = matchParams.parse(request.params);
     return reply.code(201).send(await matches.join(id, joinBody.parse(request.body), auth));
   });
+  // ---------- Logo of an empire ----------
+  // Sent as the bare image, not as a form: decided by its bytes, capped in size.
+  app.addContentTypeParser(
+    LOGO_MIME_TYPES,
+    { parseAs: "buffer", bodyLimit: LOGO_MAX_BYTES },
+    (_request, body, done) => {
+      done(null, body);
+    },
+  );
+  app.put("/api/matches/:id/empire/logo", async (request) => {
+    const auth = await guard.user(request);
+    const { id } = matchParams.parse(request.params);
+    return matches.setLogo(id, readLogo(request.body), auth);
+  });
+  app.delete("/api/matches/:id/empires/:empireId/logo", async (request) => {
+    const auth = await guard.user(request);
+    const { id, empireId } = empireParams.parse(request.params);
+    return matches.removeLogo(id, empireId, auth);
+  });
+  app.get("/api/matches/:id/empires/:empireId/logo", async (request, reply) => {
+    const { id, empireId } = empireParams.parse(request.params);
+    const logo = await matches.logo(id, empireId, await guard.optional(request));
+    const versioned = (request.query as { v?: string }).v !== undefined;
+    return (
+      reply
+        .header("content-type", logo.mime)
+        // Never interpreted as anything but the image its bytes say it is.
+        .header("x-content-type-options", "nosniff")
+        .header("content-security-policy", "default-src 'none'")
+        .header("cache-control", versioned ? "public, max-age=31536000, immutable" : "no-cache")
+        .send(Buffer.from(logo.data))
+    );
+  });
+
   app.delete("/api/matches/:id/empire", async (request) => {
     const auth = await guard.user(request);
     return matches.withdraw(matchParams.parse(request.params).id, auth);

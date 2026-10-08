@@ -472,6 +472,67 @@ describe.skipIf(!url)("matches", () => {
       ).toBe(404);
     });
 
+    it("lets a player put an image in place of the emblem, shown to everyone and removable", async () => {
+      const id = await openMatch();
+      await join("anna", id, unitIds[0] ?? 0, { empire: empire("Anna", EMPIRE_COLORS[0]) });
+      await join("bruno", id, unitIds[1] ?? 0, { empire: empire("Bruno", EMPIRE_COLORS[1]) });
+      const png = Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        Buffer.from("not really a picture"),
+      ]);
+      const put = (user: string | null, body: Buffer, type = "image/png") =>
+        app.inject({
+          method: "PUT",
+          url: `/api/matches/${id}/empire/logo`,
+          payload: body,
+          headers: { "content-type": type, ...(user ? { cookie: cookies[user] ?? "" } : {}) },
+        });
+      type Seen = { empires: { id: string; name: string; logoUrl: string | null }[] };
+      const logoOf = (seen: Seen, name: string) => seen.empires.find((e) => e.name === name);
+
+      expect((await put(null, png)).statusCode).toBe(401);
+      expect((await put("carla", png)).json()).toMatchObject({ error: { code: "NOT_A_PLAYER" } });
+      // Decided by the bytes: a script called a picture is refused, and so is a huge file.
+      expect((await put("anna", Buffer.from("<svg onload=alert(1)>"))).json()).toMatchObject({
+        error: { code: "UNSUPPORTED_IMAGE" },
+      });
+      expect((await put("anna", png, "image/svg+xml")).statusCode).toBe(415);
+      expect((await put("anna", Buffer.concat([png, Buffer.alloc(300_000)]))).statusCode).toBe(413);
+
+      const saved = await put("anna", png);
+      expect(saved.statusCode, saved.body).toBe(200);
+      const url = logoOf(saved.json<Seen>(), "Anna")?.logoUrl ?? "";
+      expect(url).toMatch(new RegExp(`^/api/matches/${id}/empires/[^/]+/logo\\?v=\\d+$`));
+      expect(logoOf(saved.json<Seen>(), "Bruno")?.logoUrl).toBeNull();
+
+      // Anyone who sees the match sees the logo, served as an image and nothing else.
+      const image = await app.inject({ url });
+      expect(image.statusCode).toBe(200);
+      expect(image.headers["content-type"]).toBe("image/png");
+      expect(image.headers["x-content-type-options"]).toBe("nosniff");
+      expect(image.headers["cache-control"]).toContain("immutable");
+      expect(image.rawPayload.equals(png)).toBe(true);
+
+      // It can change during the match, and its address changes with it.
+      await prisma.match.update({ where: { id }, data: { status: "RUNNING", currentTurn: 1 } });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 9, 9, 9]);
+      const changed = await put("anna", jpeg, "image/jpeg");
+      const newUrl = logoOf(changed.json<Seen>(), "Anna")?.logoUrl ?? "";
+      expect(newUrl).not.toBe(url);
+      expect((await app.inject({ url: newUrl })).headers["content-type"]).toBe("image/jpeg");
+
+      // Another player cannot remove it; its owner, the owner of the match and the admin can.
+      const annaId = logoOf(changed.json<Seen>(), "Anna")?.id ?? "";
+      const remove = (user: string) =>
+        as(user, "DELETE", `/api/matches/${id}/empires/${annaId}/logo`);
+      expect((await remove("bruno")).statusCode).toBe(403);
+      const removed = await remove("anna");
+      expect(removed.statusCode, removed.body).toBe(200);
+      expect(logoOf(removed.json<Seen>(), "Anna")?.logoUrl).toBeNull();
+      expect((await app.inject({ url: newUrl })).statusCode).toBe(404);
+    });
+
     it("lets a player withdraw before the start: the municipality is free again, with a new endowment", async () => {
       const id = await openMatch();
       await join("anna", id, unitIds[0] ?? 0, { empire: empire("Anna", EMPIRE_COLORS[0]) });
@@ -632,5 +693,25 @@ describe.skipIf(!url)("matches", () => {
       unitCount: 0,
       parentId: areaId,
     });
+  });
+});
+
+describe("logo of an empire", () => {
+  it("tells images by their bytes and refuses everything else", async () => {
+    const { readLogo, LOGO_MAX_BYTES } = await import("../src/modules/matches/logo.js");
+    const png = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.alloc(32),
+    ]);
+    expect(readLogo(png).mime).toBe("image/png");
+    expect(readLogo(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3])).mime).toBe("image/jpeg");
+    expect(readLogo(Buffer.from("RIFF\0\0\0\0WEBPVP8 ", "latin1")).mime).toBe("image/webp");
+    // An SVG can carry scripts: it is not an image here, whatever it is called.
+    expect(() => readLogo(Buffer.from("<svg xmlns='http://www.w3.org/2000/svg'/>"))).toThrow(
+      /PNG, JPEG or WebP/,
+    );
+    expect(() => readLogo(Buffer.from("GIF89a"))).toThrow(/PNG, JPEG or WebP/);
+    expect(() => readLogo(undefined)).toThrow(/PNG, JPEG or WebP/);
+    expect(() => readLogo(Buffer.concat([png, Buffer.alloc(LOGO_MAX_BYTES)]))).toThrow(/exceeds/);
   });
 });
