@@ -443,8 +443,11 @@ describe.skipIf(!url)("battles", () => {
       });
       expect(defender).not.toHaveProperty("attackForce");
       expect(defender).not.toHaveProperty("attackCost");
-      expect(defender).not.toHaveProperty("fromTerritoryIds");
-      expect((await state("bruno")).territories.find((t) => t.id === two)?.battleId).toBeNull();
+      // Where the attack comes from is public: the defender sees it too.
+      expect(defender).toMatchObject({ fromTerritoryIds: [two], fromNames: ["Comune 2"] });
+      expect((await state("bruno")).territories.find((t) => t.id === two)?.battleId).toBe(
+        attacker?.id,
+      );
       expect((await state("anna")).territories.find((t) => t.id === two)?.battleId).toBe(
         attacker?.id,
       );
@@ -460,6 +463,8 @@ describe.skipIf(!url)("battles", () => {
           [
             "attackerEmpireId",
             "defenderEmpireId",
+            "fromNames",
+            "fromTerritoryIds",
             "id",
             "outcome",
             "role",
@@ -471,8 +476,9 @@ describe.skipIf(!url)("battles", () => {
         );
         // The attacked territory is marked for everyone.
         expect(seen.territories.find((t) => t.id === three)?.battleId).toBe(attacker?.id);
-        // Where the attack comes from is the attacker's business.
-        expect(seen.territories.find((t) => t.id === two)?.battleId).toBeNull();
+        // So are the territories it starts from, without any amount.
+        expect(seen.battles[0]).toMatchObject({ fromTerritoryIds: [two], fromNames: ["Comune 2"] });
+        expect(seen.territories.find((t) => t.id === two)?.battleId).toBe(attacker?.id);
       }
     });
 

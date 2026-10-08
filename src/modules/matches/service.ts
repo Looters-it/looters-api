@@ -8,6 +8,7 @@ import { matchRulesSchema, resolveMatchRules, type MatchRules } from "../../rule
 import { drawHiddenResources, secureRandom, type Random } from "../../rules/hidden-resources.js";
 import { costOf } from "../../rules/attack.js";
 import { turnIncome } from "../../rules/income.js";
+import { structureDefinition } from "../../rules/structures.js";
 import type { z } from "zod";
 import {
   OPEN_EDITABLE,
@@ -47,6 +48,7 @@ const summarySelect = {
   turnEndsAt: true,
   finishedAt: true,
   winnerEmpireId: true,
+  winnerEmpireIds: true,
   inviteCode: true,
   config: true,
   ownerId: true,
@@ -71,6 +73,8 @@ function summary(row: SummaryRow, viewer: Viewer) {
     turnEndsAt: row.turnEndsAt,
     finishedAt: row.finishedAt,
     winnerEmpireId: row.winnerEmpireId,
+    /** More than one when the match ended with empires exactly level. */
+    winnerEmpireIds: row.winnerEmpireIds,
     players: row._count.empires,
     hasInviteCode: row.inviteCode !== null,
     owner: row.owner.username,
@@ -80,6 +84,18 @@ function summary(row: SummaryRow, viewer: Viewer) {
     isOwner,
     ...(isOwner ? { inviteCode: row.inviteCode } : {}),
   };
+}
+
+function moveInTurns(
+  type: string,
+  data: Prisma.JsonValue,
+  rules: MatchRules,
+  currentTurn: number,
+): number | null {
+  const every = structureDefinition(type)?.moveEveryTurns?.(rules);
+  if (every === undefined) return null;
+  const lastMove = (data as { lastMoveTurn?: number }).lastMoveTurn;
+  return lastMove === undefined ? 0 : Math.max(0, lastMove + every - currentTurn);
 }
 
 export class MatchService {
@@ -478,7 +494,14 @@ export class MatchService {
     const territoryNames = new Map(
       (
         await this.prisma.territory.findMany({
-          where: { id: { in: battles.map((battle) => battle.targetTerritoryId) } },
+          where: {
+            id: {
+              in: battles.flatMap((battle) => [
+                battle.targetTerritoryId,
+                ...battle.sources.map((source) => source.territoryId),
+              ]),
+            },
+          },
           select: { id: true, name: true },
         })
       ).map((territory) => [territory.id, territory.name]),
@@ -592,10 +615,6 @@ export class MatchService {
         )
       : [];
 
-    const targets = new Set(
-      battles.filter((battle) => battle.status === "OPEN").map((b) => b.targetTerritoryId),
-    );
-
     return {
       match: summary(match, viewer),
       me: mine
@@ -658,14 +677,8 @@ export class MatchService {
           weight: own ? territory.weight : null,
           /** Accumulation alert: public, and it never says how much is there. */
           alert: territory.alert,
-          /**
-           * The open battle it is involved in. A target is marked for everyone; which
-           * territories an attack starts from is known to the attacker alone.
-           */
-          battleId:
-            territory.battleLock && (own || targets.has(territory.id))
-              ? territory.battleLock.battleId
-              : null,
+          /** The open battle it is involved in, as target or as a source: public. */
+          battleId: territory.battleLock?.battleId ?? null,
         };
       }),
       battles: battles.map((battle) => {
@@ -685,11 +698,14 @@ export class MatchService {
           attackerEmpireId: battle.attackerEmpireId,
           defenderEmpireId: battle.defenderEmpireId,
           role,
+          // Where the attack starts from is public, like its target: every territory it
+          // involves is marked on the map for everyone.
+          fromTerritoryIds: battle.sources.map((source) => source.territoryId),
+          fromNames: battle.sources.map((source) => territoryNames.get(source.territoryId) ?? ""),
           // Each side sees its own numbers and never the other's: forces, costs
           // and rolls of the opponent would give away its hidden resources.
           ...(role === "attacker"
             ? {
-                fromTerritoryIds: battle.sources.map((source) => source.territoryId),
                 attackCost: battle.attackCost,
                 attackForce: battle.attackForce,
               }
@@ -724,6 +740,11 @@ export class MatchService {
           structure.expiresTurn === null
             ? null
             : Math.max(0, structure.expiresTurn - match.currentTurn + 1),
+        /**
+         * For a structure that can change territory: turns to wait before it can move
+         * again, 0 when it can move now. Null for one that stays where it was built.
+         */
+        moveInTurns: moveInTurns(structure.type, structure.data, rules, match.currentTurn),
       })),
       online: {
         connected: this.matchOnline(id),

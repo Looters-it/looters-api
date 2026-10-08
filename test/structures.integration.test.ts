@@ -385,7 +385,13 @@ describe.skipIf(!url)("structures and merged areas", () => {
         await as("anna", "POST", `/api/matches/${matchId}/merge/preview`, {
           territoryIds: await Promise.all(indexes.map(idOf)),
         })
-      ).json<{ perTerritory: number; cost: number; problem: string | null; maxUnits: number }>();
+      ).json<{
+        perTerritory: number;
+        cost: number;
+        problem: string | null;
+        maxUnits: number;
+        blocksLost: number;
+      }>();
 
     it("joins contiguous territories into one area that sums their resources", async () => {
       // Half a turn of income (45) for each territory included.
@@ -493,12 +499,22 @@ describe.skipIf(!url)("structures and merged areas", () => {
       expect(areas.features[0]?.properties.lon).toBeGreaterThan(9.1);
     });
 
-    it("carries the structures of the merged territories onto the area", async () => {
+    it("cancels a block on a merged municipality, after warning, and keeps other structures", async () => {
       await build("anna", "BLOCK", 2);
+      expect((await preview([1, 2])).blocksLost).toBe(1);
+      expect((await preview([1, 3])).blocksLost).toBe(0);
+      expect((await state("anna")).structures).toHaveLength(1);
+
       await merge("anna", [1, 2]);
       const after = await state("anna");
-      const area = after.territories.find((territory) => territory.isArea);
-      expect(after.structures).toMatchObject([{ type: "BLOCK", territoryId: area?.id }]);
+      // A block protects one municipality: it does not stretch over the area.
+      expect(after.structures).toEqual([]);
+      expect(
+        await prisma.structure.findMany({
+          where: { matchId },
+          select: { type: true, active: true },
+        }),
+      ).toEqual([{ type: "BLOCK", active: false }]);
     });
   });
 });

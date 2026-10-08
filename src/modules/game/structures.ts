@@ -284,6 +284,22 @@ export class StructureService {
     return { ...base, problem: null, available };
   }
 
+  /**
+   * The blocks standing on the territories of a merge. A block protects one
+   * municipality: it does not stretch over an area, so merging cancels it.
+   */
+  private async blocksOn(tx: Tx, territoryIds: string[]) {
+    const structures = await tx.structure.findMany({
+      where: { territoryId: { in: territoryIds }, active: true },
+      select: { id: true, data: true },
+    });
+    return structures
+      .filter((structure) =>
+        ((structure.data as { effects?: string[] }).effects ?? []).includes("NO_ATTACK_ON"),
+      )
+      .map((structure) => structure.id);
+  }
+
   /** What a merge would cost and whether it is possible, without doing it. */
   async previewMerge(matchId: string, body: z.infer<typeof mergePreviewBody>, viewer: AuthContext) {
     return this.prisma.$transaction(async (tx) => {
@@ -295,6 +311,8 @@ export class StructureService {
         available: plan.available,
         maxUnits: rules.mergeMaxUnits,
         problem: plan.problem,
+        /** Blocks the merge would cancel: the player is warned before confirming. */
+        blocksLost: (await this.blocksOn(tx, [...new Set(body.territoryIds)])).length,
       };
     });
   }
@@ -326,7 +344,11 @@ export class StructureService {
         where: { matchId, territoryId: { in: absorbed } },
         data: { territoryId: keep.id },
       });
-      // Structures follow the territory they stood on.
+      // A block does not survive the merge; every other structure follows its territory.
+      await tx.structure.updateMany({
+        where: { id: { in: await this.blocksOn(tx, [keep.id, ...absorbed]) } },
+        data: { active: false },
+      });
       await tx.structure.updateMany({
         where: { territoryId: { in: absorbed } },
         data: { territoryId: keep.id },

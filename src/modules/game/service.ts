@@ -236,10 +236,17 @@ export class GameService {
       if (paid.count === 0) {
         throw conflict("NOT_ENOUGH_RESOURCES", "The paying territory cannot afford the annexation");
       }
+      // In the proportional split of the income the newcomer weighs like the average of
+      // the territories the empire already has, so that it gets a share like theirs.
+      const weights = await tx.territory.aggregate({
+        where: { ownerEmpireId: empire.id },
+        _avg: { weight: true },
+      });
       const taken = await tx.territory.updateMany({
         where: { id: target.territory.id, ownerEmpireId: null },
         data: {
           ownerEmpireId: empire.id,
+          weight: Math.max(1, Math.round(weights._avg.weight ?? 1)),
           // Just acquired: it cannot be attacked until this turn ends. The resources
           // it already holds (its hidden endowment) stay on it and are now the empire's.
           protectedUntilTurn: match.currentTurn,

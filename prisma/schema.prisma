@@ -200,6 +200,8 @@ model Match {
   // Full rules configuration, materialised at creation (see src/rules/config.ts).
   config         Json
   winnerEmpireId String?
+  // Every winner: one empire, or several when they end the match exactly level.
+  winnerEmpireIds String[] @default([])
   createdAt      DateTime       @default(now())
   finishedAt     DateTime?
   areas          MatchArea[]

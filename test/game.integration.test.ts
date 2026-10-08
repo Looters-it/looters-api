@@ -138,6 +138,13 @@ describe.skipIf(!url)("turns, resources and annexations", () => {
     (response.json() as { error?: { code: string } }).error?.code;
 
   describe("annexation", () => {
+    it("gives the new territory the average weight of those the empire already has", async () => {
+      const capital = await territoryOf(0);
+      await prisma.territory.update({ where: { id: capital.id }, data: { weight: 6 } });
+      expect((await annex("anna", 1, 0)).statusCode).toBe(200);
+      expect((await territoryOf(1)).weight).toBe(6);
+    });
+
     it("takes a free neighbour at once, for the fixed cost, with its hidden resources", async () => {
       const capital = await territoryOf(0);
       const target = await territoryOf(1);
