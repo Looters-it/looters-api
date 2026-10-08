@@ -10,7 +10,6 @@ const prisma = createPrisma(env.DATABASE_URL);
 
 let lastJobsPongAt: Date | null = null;
 
-// Used from M7, when battles exist; connected now so that readiness reports it.
 const battleQueue = createBattleQueue({
   brokers: env.KAFKA_BROKERS,
   topic: env.KAFKA_BATTLE_TOPIC,
@@ -25,6 +24,7 @@ const app = await buildApp({
   trustProxy: env.TRUST_PROXY,
   uploads: { dir: env.UPLOAD_DIR, maxMegabytes: env.UPLOAD_MAX_MB },
   tileCacheMegabytes: env.TILE_CACHE_MB,
+  battleQueue,
   auth: {
     cookieName: env.SESSION_COOKIE_NAME,
     cookieSecure: env.COOKIE_SECURE,

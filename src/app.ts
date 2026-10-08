@@ -11,6 +11,7 @@ import { registerGeoAdminRoutes } from "./modules/geo/admin-routes.js";
 import { registerGeoPublicRoutes } from "./modules/geo/public-routes.js";
 import { TileCache } from "./modules/geo/tile-cache.js";
 import { registerHealthRoutes, type HealthDeps } from "./modules/health/routes.js";
+import { BattleService, type ResolutionQueue } from "./modules/game/battles.js";
 import { registerGameRoutes } from "./modules/game/routes.js";
 import { GameService } from "./modules/game/service.js";
 import { registerMatchRoutes } from "./modules/matches/routes.js";
@@ -47,6 +48,8 @@ export interface AppDeps {
   auth?: Partial<AuthConfig>;
   /** Where geo files are stored (shared with `jobs`) and how large one may be. */
   uploads?: { dir: string; maxMegabytes: number };
+  /** Where battles are handed to `jobs` for resolution; a no-op when omitted (tests). */
+  battleQueue?: ResolutionQueue;
   /** Memory given to generated map tiles. */
   tileCacheMegabytes?: number;
   logger?: FastifyServerOptions["logger"];
@@ -98,7 +101,20 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const game = new GameService(deps.prisma, matches);
   game.onChange = matches.onChange;
   registerMatchRoutes(app, { prisma: deps.prisma, guard, tileCache, service: matches });
-  registerGameRoutes(app, game, guard);
+  const battles = new BattleService(
+    deps.prisma,
+    matches,
+    deps.battleQueue ?? { requestResolution: () => Promise.resolve() },
+  );
+  battles.onChange = matches.onChange;
+  battles.onIncoming = (matchId, userId, battleId) => {
+    hub.publishToUser(matchId, userId, { t: "battle.incoming", matchId, battleId });
+  };
+  battles.onQueueError = (error, battleId) => {
+    // Not fatal: the battle is resolved, with the recorded answer, when the turn closes.
+    app.log.error({ err: error, battleId }, "battle not handed to jobs");
+  };
+  registerGameRoutes(app, game, battles, guard);
   registerStatsRoutes(app, hub);
   await registerWebSocket(app, hub, guard, async (matchId, userId) => {
     const empires = await deps.prisma.empire.count({

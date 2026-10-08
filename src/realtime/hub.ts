@@ -8,7 +8,9 @@ export type ServerMessage =
   /** Something of the match changed: the client reads its state again. */
   | { t: "match.update"; matchId: string; kinds: string[] }
   /** Players of the match connected right now, out of those still in play. */
-  | { t: "match.online"; matchId: string; connected: number };
+  | { t: "match.online"; matchId: string; connected: number }
+  /** Sent only to the attacked player: an attack is waiting for an answer. */
+  | { t: "battle.incoming"; matchId: string; battleId: string };
 
 /** One open socket, authenticated or anonymous. */
 export interface Connection {
@@ -96,6 +98,14 @@ export class RealtimeHub {
     const data = JSON.stringify(message);
     for (const connection of this.connections) {
       if (connection.matches?.has(matchId)) connection.send(data);
+    }
+  }
+
+  /** Sends a message to the sockets of one user that follow the match. */
+  publishToUser(matchId: string, userId: string, message: ServerMessage): void {
+    const data = JSON.stringify(message);
+    for (const connection of this.connections) {
+      if (connection.userId === userId && connection.matches?.has(matchId)) connection.send(data);
     }
   }
 

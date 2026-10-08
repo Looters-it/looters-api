@@ -1,15 +1,13 @@
-import { Prisma, type Empire, type Match, type PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "@prisma/client";
 import { z } from "zod";
 import type { AuthContext } from "../../auth/sessions.js";
 import { recordEvent } from "../../events/events.js";
 import { AppError, notFound } from "../../http/errors.js";
 import type { MatchRules } from "../../rules/config.js";
-import { rulesOf, type MatchService } from "../matches/service.js";
+import type { MatchService } from "../matches/service.js";
+import { acting, conflict, lockTerritories, neighboursOf } from "./shared.js";
 
-type Tx = Prisma.TransactionClient;
 type Viewer = AuthContext | null;
-
-const conflict = (code: string, message: string) => new AppError(409, code, message);
 
 /** Every action names the turn it was decided in: a turn that closed meanwhile refuses it. */
 const turn = z.number().int().min(1);
@@ -34,13 +32,6 @@ export const allocationRuleBody = z.strictObject({
   weights: z.record(z.string().min(1), z.number().int().min(0).max(1_000_000)).optional(),
 });
 
-interface Neighbour {
-  geoUnitId: number;
-  name: string;
-  territoryId: string;
-  ownerEmpireId: string | null;
-}
-
 /**
  * The immediate actions of the game. Each one runs in a transaction that
  * holds the match row shared (a closing turn takes it exclusively, so an
@@ -55,29 +46,6 @@ export class GameService {
     private readonly prisma: PrismaClient,
     private readonly matches: MatchService,
   ) {}
-
-  /**
-   * Municipalities adjacent to a territory, with the territory each belongs
-   * to. Adjacency of a match is derived from the adjacency of municipalities:
-   * a territory borders whatever any of its municipalities borders.
-   */
-  private neighbours(db: Tx | PrismaClient, matchId: string, territoryId: string) {
-    return db.$queryRaw<Neighbour[]>`
-      WITH own AS (
-        SELECT "geoUnitId" FROM "TerritoryUnit" WHERE "territoryId" = ${territoryId}
-      ), adjacent AS (
-        SELECT "bId" AS id FROM "GeoAdjacency" WHERE "aId" IN (SELECT "geoUnitId" FROM own)
-        UNION
-        SELECT "aId" FROM "GeoAdjacency" WHERE "bId" IN (SELECT "geoUnitId" FROM own)
-      )
-      SELECT u.id AS "geoUnitId", u.name, t.id AS "territoryId", t."ownerEmpireId"
-      FROM adjacent
-      JOIN "TerritoryUnit" tu ON tu."matchId" = ${matchId} AND tu."geoUnitId" = adjacent.id
-      JOIN "Territory" t ON t.id = tu."territoryId"
-      JOIN "GeoUnit" u ON u.id = adjacent.id
-      WHERE t.id <> ${territoryId}
-      ORDER BY u.name`;
-  }
 
   /**
    * The card of a municipality: who owns it, its neighbours and, for a
@@ -105,7 +73,7 @@ export class GameService {
     const { territory } = unit;
 
     const [neighbours, mine] = await Promise.all([
-      this.neighbours(this.prisma, matchId, territory.id),
+      neighboursOf(this.prisma, matchId, territory.id),
       viewer
         ? this.prisma.empire.findFirst({
             where: { matchId, userId: viewer.user.id, status: "ACTIVE" },
@@ -143,6 +111,41 @@ export class GameService {
       };
     }
 
+    // A player looking at an enemy territory: can it be attacked, and from where.
+    let attack = null;
+    if (mine && match.status === "RUNNING" && territory.ownerEmpireId && !own) {
+      const ids = [
+        ...new Set(neighbours.filter((n) => n.ownerEmpireId === mine.id).map((n) => n.territoryId)),
+      ];
+      const sources = await this.prisma.territory.findMany({
+        where: { id: { in: ids } },
+        orderBy: { resources: "desc" },
+        select: {
+          id: true,
+          name: true,
+          resources: true,
+          battleLock: { select: { battleId: true } },
+        },
+      });
+      const isProtected = (territory.protectedUntilTurn ?? 0) >= Math.max(match.currentTurn, 1);
+      attack = {
+        /** Why the territory cannot be attacked now, if so. */
+        blocked: isProtected
+          ? ("PROTECTED" as const)
+          : territory.battleLock
+            ? ("IN_BATTLE" as const)
+            : sources.length === 0
+              ? ("NOT_ADJACENT" as const)
+              : null,
+        from: sources.map((source) => ({
+          territoryId: source.id,
+          name: source.name,
+          resources: source.resources,
+          usable: source.battleLock === null && source.resources >= 1,
+        })),
+      };
+    }
+
     return {
       geoUnitId,
       name: unit.geoUnit.name,
@@ -157,27 +160,8 @@ export class GameService {
       },
       neighbours,
       annex,
+      attack,
     };
-  }
-
-  /** Locks what an action needs and checks that the viewer can act now. */
-  private async acting(tx: Tx, matchId: string, viewer: AuthContext, decidedInTurn: number) {
-    const matches = await tx.$queryRaw<Match[]>`
-      SELECT * FROM "Match" WHERE id = ${matchId} FOR SHARE`;
-    const match = matches[0];
-    if (!match || match.status === "DRAFT") throw notFound("Match");
-    if (match.status !== "RUNNING") {
-      throw conflict("MATCH_NOT_RUNNING", "The match is not being played");
-    }
-    if (match.currentTurn !== decidedInTurn) {
-      throw conflict("TURN_CHANGED", "The turn has changed: look at the map again");
-    }
-    const empires = await tx.$queryRaw<Empire[]>`
-      SELECT * FROM "Empire" WHERE "matchId" = ${matchId} AND "userId" = ${viewer.user.id} FOR UPDATE`;
-    const empire = empires[0];
-    if (!empire) throw new AppError(403, "NOT_A_PLAYER", "You have no empire in this match");
-    if (empire.status !== "ACTIVE") throw conflict("EMPIRE_FALLEN", "Your empire has fallen");
-    return { match, empire, rules: rulesOf(match) };
   }
 
   /**
@@ -187,7 +171,7 @@ export class GameService {
    */
   async annex(matchId: string, body: z.infer<typeof annexBody>, viewer: AuthContext) {
     await this.prisma.$transaction(async (tx) => {
-      const { match, empire, rules } = await this.acting(tx, matchId, viewer, body.turn);
+      const { match, empire, rules } = await acting(tx, matchId, viewer, body.turn);
       if (empire.annexedThisTurn >= rules.annexPerTurn) {
         throw conflict("ANNEX_LIMIT", "No annexations left this turn");
       }
@@ -201,17 +185,16 @@ export class GameService {
         throw conflict("TERRITORY_TAKEN", "This municipality belongs to an empire");
       }
 
-      const payer = await tx.territory.findFirst({
-        where: { id: body.payFromTerritoryId, matchId, ownerEmpireId: empire.id },
-        select: { id: true, battleLock: { select: { battleId: true } } },
-      });
-      if (!payer)
+      // Locked before it is read: an attack on it that commits meanwhile is seen here.
+      const payer = (await lockTerritories(tx, matchId, [body.payFromTerritoryId]))[0];
+      if (payer?.ownerEmpireId !== empire.id) {
         throw conflict("NOT_YOUR_TERRITORY", "You can pay only from your own territories");
-      const adjacent = await this.neighbours(tx, matchId, payer.id);
+      }
+      const adjacent = await neighboursOf(tx, matchId, payer.id);
       if (!adjacent.some((n) => n.territoryId === target.territory.id)) {
         throw conflict("NOT_ADJACENT", "The paying territory does not border the target");
       }
-      if (payer.battleLock) {
+      if (payer.inBattle) {
         throw conflict("TERRITORY_IN_BATTLE", "A territory in a battle cannot spend resources");
       }
 
@@ -262,20 +245,17 @@ export class GameService {
     if (ids.length === 0) return this.matches.state(matchId, viewer);
 
     await this.prisma.$transaction(async (tx) => {
-      const { empire } = await this.acting(tx, matchId, viewer, body.turn);
-      const territories = await tx.$queryRaw<{ id: string; resources: number; locked: boolean }[]>`
-        SELECT t.id, t.resources,
-          EXISTS (SELECT 1 FROM "BattleLock" l WHERE l."territoryId" = t.id) AS locked
-        FROM "Territory" t
-        WHERE t.id IN (${Prisma.join(ids)}) AND t."ownerEmpireId" = ${empire.id}
-        ORDER BY t.id FOR UPDATE OF t`;
+      const { empire } = await acting(tx, matchId, viewer, body.turn);
+      const territories = (await lockTerritories(tx, matchId, ids)).filter(
+        (territory) => territory.ownerEmpireId === empire.id,
+      );
       if (territories.length !== ids.length) {
         throw conflict(
           "NOT_YOUR_TERRITORY",
           "You can move resources only between your own territories",
         );
       }
-      if (territories.some((territory) => territory.locked)) {
+      if (territories.some((territory) => territory.inBattle)) {
         throw conflict(
           "TERRITORY_IN_BATTLE",
           "Resources of a territory in a battle cannot be moved",

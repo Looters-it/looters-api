@@ -395,10 +395,11 @@ describe.skipIf(!url)("turns, resources and annexations", () => {
       // Free municipalities are not in the state at all.
       expect(seen.territories.every((t) => t.ownerEmpireId)).toBe(true);
     }
-    // The events, public by nature, carry names only.
-    const events = JSON.stringify(await prisma.gameEvent.findMany({ where: { matchId } }));
-    for (const amount of hidden.filter((value) => value > 99))
-      expect(events).not.toContain(String(amount));
+    // The events, public by nature, carry names only: no number at all in their data.
+    // (Ids and timestamps are left out: they contain digits by nature.)
+    const events = await prisma.gameEvent.findMany({ where: { matchId }, select: { data: true } });
+    expect(hidden.length).toBeGreaterThan(0);
+    expect(JSON.stringify(events.map((event) => event.data))).not.toMatch(/\d{2,}/);
   });
 
   describe("live updates", () => {

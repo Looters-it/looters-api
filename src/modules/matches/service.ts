@@ -6,6 +6,7 @@ import { AppError, forbidden, notFound } from "../../http/errors.js";
 import { enqueueJob } from "../../queue/jobs.js";
 import { matchRulesSchema, resolveMatchRules, type MatchRules } from "../../rules/config.js";
 import { drawHiddenResources, secureRandom, type Random } from "../../rules/hidden-resources.js";
+import { costOf } from "../../rules/attack.js";
 import { turnIncome } from "../../rules/income.js";
 import type { z } from "zod";
 import {
@@ -449,6 +450,7 @@ export class MatchService {
           protectedUntilTurn: true,
           weight: true,
           isArea: true,
+          battleLock: { select: { battleId: true } },
           units: { select: { geoUnitId: true } },
         },
       }),
@@ -456,10 +458,44 @@ export class MatchService {
     const mine = empires.find((empire) => empire.userId === viewer?.user.id) ?? null;
     const currentTurn = Math.max(match.currentTurn, 1);
     const rules = rulesOf(match);
+
+    // Open battles are public (a territory under attack is marked on the map for
+    // everyone). The battles just resolved are shown to their two sides only.
+    const battles = await this.prisma.battle.findMany({
+      where: {
+        matchId: id,
+        OR: [
+          { status: "OPEN" },
+          ...(mine
+            ? [
+                {
+                  status: "RESOLVED" as const,
+                  turn: { gte: match.currentTurn - 1 },
+                  OR: [{ attackerEmpireId: mine.id }, { defenderEmpireId: mine.id }],
+                },
+              ]
+            : []),
+        ],
+      },
+      orderBy: { createdAt: "desc" },
+      include: { sources: { select: { territoryId: true, cost: true } } },
+    });
+    const territoryNames = new Map(
+      (
+        await this.prisma.territory.findMany({
+          where: { id: { in: battles.map((battle) => battle.targetTerritoryId) } },
+          select: { id: true, name: true },
+        })
+      ).map((territory) => [territory.id, territory.name]),
+    );
     const unitsOf = (empireId: string) =>
       territories
         .filter((territory) => territory.ownerEmpireId === empireId)
         .reduce((sum, territory) => sum + territory.units.length, 0);
+
+    const targets = new Set(
+      battles.filter((battle) => battle.status === "OPEN").map((b) => b.targetTerritoryId),
+    );
 
     return {
       match: summary(match, viewer),
@@ -498,6 +534,50 @@ export class MatchService {
           // Hidden from everyone but the owner: null, never the number.
           resources: own ? territory.resources : null,
           weight: own ? territory.weight : null,
+          /**
+           * The open battle it is involved in. A target is marked for everyone; which
+           * territories an attack starts from is known to the attacker alone.
+           */
+          battleId:
+            territory.battleLock && (own || targets.has(territory.id))
+              ? territory.battleLock.battleId
+              : null,
+        };
+      }),
+      battles: battles.map((battle) => {
+        const role =
+          mine?.id === battle.attackerEmpireId
+            ? ("attacker" as const)
+            : mine?.id === battle.defenderEmpireId
+              ? ("defender" as const)
+              : null;
+        return {
+          id: battle.id,
+          turn: battle.turn,
+          status: battle.status,
+          outcome: battle.outcome,
+          targetTerritoryId: battle.targetTerritoryId,
+          targetName: territoryNames.get(battle.targetTerritoryId) ?? "",
+          attackerEmpireId: battle.attackerEmpireId,
+          defenderEmpireId: battle.defenderEmpireId,
+          role,
+          // Each side sees its own numbers and never the other's: forces, costs
+          // and rolls of the opponent would give away its hidden resources.
+          ...(role === "attacker"
+            ? {
+                fromTerritoryIds: battle.sources.map((source) => source.territoryId),
+                attackCost: battle.attackCost,
+                attackForce: battle.attackForce,
+              }
+            : {}),
+          ...(role === "defender"
+            ? {
+                response: battle.response,
+                defenseForce: battle.defenseForce,
+                defenseCost:
+                  battle.defenseCost ?? costOf(battle.defenseForce ?? 0, rules.defensePct),
+              }
+            : {}),
         };
       }),
       online: {
