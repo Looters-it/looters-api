@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { Prisma, type PrismaClient } from "@prisma/client";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
@@ -24,7 +25,16 @@ const password = z.string().min(8).max(200);
 
 // Strict on purpose: a body carrying `role` (or anything else) is rejected,
 // so no registration path can ever create an admin.
-const registerBody = z.strictObject({ username, email: z.email().max(254), password });
+const registerBody = z.strictObject({
+  username,
+  email: z.email().max(254),
+  password,
+  /**
+   * The honeypot of the registration form: a field no person sees. Whatever
+   * fills it is a programme, and is told that it worked while nothing is created.
+   */
+  contactTime: z.string().max(200).optional(),
+});
 const loginBody = z.strictObject({ username: z.string().max(100), password: z.string().max(200) });
 
 /** Verified when the username does not exist, so that both cases take the same time. */
@@ -59,6 +69,11 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthRoutesDeps): 
     limits.register.hit(ipKey);
 
     const body = registerBody.parse(request.body);
+    if (body.contactTime) {
+      request.log.warn({ event: "honeypot", route: "register" }, "registration by a programme");
+      // The answer of a registration that worked, without a user and without a session.
+      return reply.code(201).send({ id: randomUUID(), username: body.username, role: "USER" });
+    }
     try {
       const user = await prisma.user.create({
         data: {

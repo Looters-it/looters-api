@@ -82,6 +82,40 @@ describe.skipIf(!url)("authentication", () => {
     expect.poll(condition, { timeout: 3000, interval: 10 }).toBe(true);
 
   describe("registration", () => {
+    it("tells a programme that fills the hidden field that it registered, and creates nothing", async () => {
+      await start();
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/auth/register",
+        payload: {
+          username: "robot_42",
+          email: "robot@example.test",
+          password: "password-123",
+          contactTime: "anytime",
+        },
+      });
+      // The same answer as a registration that worked…
+      expect(response.statusCode).toBe(201);
+      expect(response.json()).toMatchObject({ username: "robot_42", role: "USER" });
+      // …but no user and no session behind it.
+      expect(response.cookies).toEqual([]);
+      expect(await prisma.user.count({ where: { username: "robot_42" } })).toBe(0);
+
+      // A person leaves it empty, and registers.
+      const person = await app.inject({
+        method: "POST",
+        url: "/api/auth/register",
+        payload: {
+          username: "persona_1",
+          email: "p@example.test",
+          password: "password-123",
+          contactTime: "",
+        },
+      });
+      expect(person.statusCode).toBe(201);
+      expect(await prisma.user.count({ where: { username: "persona_1" } })).toBe(1);
+    });
+
     it("creates a normal user, starts a session and stores only hashes", async () => {
       await start();
       const response = await post("/api/auth/register", mario);
