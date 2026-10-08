@@ -2,7 +2,7 @@
 # requests run at once (measured with the load test, see docs/LOAD.md).
 FROM node:22-bookworm-slim AS base
 # Prisma's query engine needs OpenSSL; wget is for the container health check.
-RUN apt-get update && apt-get install -y --no-install-recommends openssl wget ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends openssl wget ca-certificates util-linux \
   && rm -rf /var/lib/apt/lists/* && corepack enable
 WORKDIR /app
 
