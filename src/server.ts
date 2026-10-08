@@ -1,6 +1,7 @@
 import { buildApp } from "./app.js";
 import { loadServerEnv } from "./config/env.js";
 import { createPrisma } from "./db/prisma.js";
+import { REDACTED_PATHS } from "./http/logging.js";
 import { createBattleQueue } from "./queue/battles.js";
 import { enqueueJob } from "./queue/jobs.js";
 import { listenForNotifications } from "./queue/notifications.js";
@@ -20,7 +21,7 @@ const battleQueue = createBattleQueue({
 
 const app = await buildApp({
   prisma,
-  logger: { level: env.LOG_LEVEL },
+  logger: { level: env.LOG_LEVEL, redact: REDACTED_PATHS },
   trustProxy: env.TRUST_PROXY,
   uploads: { dir: env.UPLOAD_DIR, maxMegabytes: env.UPLOAD_MAX_MB },
   tileCacheMegabytes: env.TILE_CACHE_MB,
@@ -68,6 +69,15 @@ const shutdown = async () => {
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
     void shutdown().then(() => process.exit(0));
+  });
+}
+
+// A failure outside any request: logged with its stack, then the process stops and the
+// container restarts it, rather than carrying on in an unknown state.
+for (const event of ["uncaughtException", "unhandledRejection"] as const) {
+  process.on(event, (error) => {
+    app.log.fatal({ event: "process_crash", cause: event, err: error }, "fatal error");
+    process.exit(1);
   });
 }
 

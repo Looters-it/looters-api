@@ -41,7 +41,19 @@ export function registerErrorHandling(app: FastifyInstance): void {
         .code(error.statusCode)
         .send({ error: { code: "BAD_REQUEST", message: error.message } });
     }
-    request.log.error({ err: error }, "unhandled error");
-    return reply.code(500).send({ error: { code: "INTERNAL", message: "Internal error" } });
+    request.log.error(
+      {
+        event: "unhandled_error",
+        err: error,
+        method: request.method,
+        route: request.routeOptions.url ?? "unmatched",
+        userId: request.userId,
+      },
+      "unhandled error",
+    );
+    // The id is the way from a player's report to the line above.
+    return reply
+      .code(500)
+      .send({ error: { code: "INTERNAL", message: "Internal error", requestId: request.id } });
   });
 }

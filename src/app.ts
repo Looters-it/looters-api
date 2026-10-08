@@ -5,6 +5,7 @@ import { createAuthGuard } from "./auth/guard.js";
 import { RateLimiter, type RateLimitRule } from "./auth/rate-limit.js";
 import { SessionService } from "./auth/sessions.js";
 import { registerErrorHandling } from "./http/errors.js";
+import { LOGGING_SERVER_OPTIONS, registerRequestLogging } from "./http/logging.js";
 import { registerAdminRoutes } from "./modules/admin/routes.js";
 import { registerAuthRoutes } from "./modules/auth/routes.js";
 import { registerGeoAdminRoutes } from "./modules/geo/admin-routes.js";
@@ -64,9 +65,14 @@ export interface AppDeps {
 /** Builds the HTTP application without starting it, so tests can inject requests. */
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const auth = { ...DEFAULT_AUTH_CONFIG, ...deps.auth };
-  const app = Fastify({ logger: deps.logger ?? false, trustProxy: deps.trustProxy ?? false });
+  const app = Fastify({
+    logger: deps.logger ?? false,
+    trustProxy: deps.trustProxy ?? false,
+    ...LOGGING_SERVER_OPTIONS,
+  });
 
   registerErrorHandling(app);
+  registerRequestLogging(app);
   await app.register(cookie);
 
   const hub = new RealtimeHub();

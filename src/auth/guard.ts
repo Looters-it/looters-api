@@ -12,7 +12,12 @@ export interface AuthGuard {
 }
 
 export function createAuthGuard(sessions: SessionService, cookieName: string): AuthGuard {
-  const optional = (request: FastifyRequest) => sessions.resolve(request.cookies[cookieName]);
+  const optional = async (request: FastifyRequest) => {
+    const auth = await sessions.resolve(request.cookies[cookieName]);
+    // For the request log: who made the call.
+    request.userId = auth?.user.id ?? null;
+    return auth;
+  };
   const user = async (request: FastifyRequest) => {
     const auth = await optional(request);
     if (!auth) throw unauthorized();
