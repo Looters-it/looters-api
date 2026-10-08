@@ -53,6 +53,8 @@ const matchRulesBase = z.strictObject({
 
   // Board (§2.11)
   boardMaxChars: z.number().int().min(1).default(500),
+  // Seconds an empire must wait between two messages (provisional value, see docs/SPEC.md).
+  boardMessageIntervalSec: count.default(20),
 });
 
 /** Some of the rules: what an owner sends to depart from the defaults. */

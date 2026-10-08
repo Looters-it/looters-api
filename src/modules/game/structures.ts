@@ -321,6 +321,11 @@ export class StructureService {
         where: { territoryId: { in: absorbed } },
         data: { territoryId: keep.id },
       });
+      // Past announcements about the absorbed territories now lead to the area.
+      await tx.gameEvent.updateMany({
+        where: { matchId, territoryId: { in: absorbed } },
+        data: { territoryId: keep.id },
+      });
       // Structures follow the territory they stood on.
       await tx.structure.updateMany({
         where: { territoryId: { in: absorbed } },

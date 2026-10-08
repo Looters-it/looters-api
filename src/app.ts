@@ -11,6 +11,8 @@ import { registerGeoAdminRoutes } from "./modules/geo/admin-routes.js";
 import { registerGeoPublicRoutes } from "./modules/geo/public-routes.js";
 import { TileCache } from "./modules/geo/tile-cache.js";
 import { registerHealthRoutes, type HealthDeps } from "./modules/health/routes.js";
+import { registerBoardRoutes } from "./modules/board/routes.js";
+import { BoardService } from "./modules/board/service.js";
 import { BattleService, type ResolutionQueue } from "./modules/game/battles.js";
 import { registerGameRoutes } from "./modules/game/routes.js";
 import { GameService } from "./modules/game/service.js";
@@ -118,6 +120,9 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const structures = new StructureService(deps.prisma, matches);
   structures.onChange = matches.onChange;
   registerGameRoutes(app, game, battles, structures, guard);
+  const board = new BoardService(deps.prisma, matches);
+  board.onChange = matches.onChange;
+  registerBoardRoutes(app, board, guard);
   registerStatsRoutes(app, hub);
   await registerWebSocket(app, hub, guard, async (matchId, userId) => {
     const empires = await deps.prisma.empire.count({
