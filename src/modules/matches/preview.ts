@@ -1,66 +1,93 @@
-import type { PrismaClient } from "@prisma/client";
+import { Prisma, type PrismaClient } from "@prisma/client";
 
-/** How long a preview is served before it is drawn again. */
+/** How long the empires of a preview are served before they are drawn again. */
 export const PREVIEW_TTL_MS = 30_000;
-/** Cells across, at most; the height follows the shape of the area. */
-const MAX_COLUMNS = 64;
-const MAX_ROWS = 80;
+/** The picture is this many units across: borders are simplified to about one of them. */
+const DETAIL = 300;
 
 export interface MatchPreview {
-  columns: number;
-  rows: number;
-  /** Cells with free municipalities only: x, y, x, y… */
-  free: number[];
-  /** Cells held by an empire, by its colour: x, y, x, y… */
-  owned: Record<string, number[]>;
+  /** `min-x min-y width height`, for the SVG that draws the paths. */
+  viewBox: string;
+  /** The outline of the whole area of the match, as an SVG path. */
+  outline: string;
+  /** What each empire holds, as an SVG path in its colour. */
+  empires: { color: string; path: string }[];
+}
+
+interface Frame {
+  viewBox: string;
+  outline: string;
+  squeeze: number;
+  tolerance: number;
+}
+
+/** The municipalities of a match, as a condition on the GeoUnit alias `u`. */
+const inMatch = (matchId: string) =>
+  Prisma.sql`u.id IN (SELECT "geoUnitId" FROM "TerritoryUnit" WHERE "matchId" = ${matchId})`;
+
+/**
+ * The outline of a match: its municipalities merged into one shape, with the
+ * real borders simplified to the size of a card. It never changes once the
+ * match is open (the municipalities are fixed then) and merging thousands of
+ * polygons takes a second or two, so it is drawn once and kept.
+ */
+const frames = new Map<string, Promise<Frame>>();
+
+function frameOf(prisma: PrismaClient, matchId: string): Promise<Frame> {
+  const kept = frames.get(matchId);
+  if (kept) return kept;
+  const frame = (async () => {
+    const boxes = await prisma.$queryRaw<
+      { west: number | null; east: number; south: number; north: number }[]
+    >`SELECT ST_XMin(e) AS west, ST_XMax(e) AS east, ST_YMin(e) AS south, ST_YMax(e) AS north
+      FROM (SELECT ST_Extent(u."geomSimple") AS e FROM "GeoUnit" u WHERE ${inMatch(matchId)}) box`;
+    const box = boxes[0];
+    if (box?.west == null) return { viewBox: "0 0 1 1", outline: "", squeeze: 1, tolerance: 0 };
+    // A degree of longitude is shorter than one of latitude, by the cosine of the latitude.
+    const squeeze = Math.cos((((box.south + box.north) / 2) * Math.PI) / 180);
+    const width = (box.east - box.west) * squeeze;
+    const height = box.north - box.south;
+    const tolerance = Math.max(width, height) / DETAIL;
+    const rows = await prisma.$queryRaw<{ path: string | null }[]>`
+      SELECT ST_AsSVG(ST_Simplify(ST_Scale(ST_Union(u."geomSimple"), ${squeeze}, 1), ${tolerance}), 0, 4) AS path
+      FROM "GeoUnit" u WHERE ${inMatch(matchId)}`;
+    return {
+      // ST_AsSVG flips the latitude, so that north is up.
+      viewBox: [box.west * squeeze, -box.north, width, height].map((n) => n.toFixed(4)).join(" "),
+      outline: rows[0]?.path ?? "",
+      squeeze,
+      tolerance,
+    };
+  })();
+  if (frames.size > 500) frames.clear();
+  frames.set(matchId, frame);
+  frame.catch(() => frames.delete(matchId));
+  return frame;
 }
 
 /**
- * Reduces a match to a grid: every municipality falls in the cell of its
- * centre, and a cell takes the colour of the empire with most municipalities
- * in it. Only what is public is used: who owns what, and the colours.
+ * A small map of a match for its card: the real outline of its area and,
+ * inside it, what every empire holds, each with its real borders. Only what
+ * is public is used: who owns what, and the colours.
  */
 export async function matchPreview(prisma: PrismaClient, matchId: string): Promise<MatchPreview> {
-  const units = await prisma.$queryRaw<{ lon: number; lat: number; color: string | null }[]>`
-    SELECT u."centroidLon" AS lon, u."centroidLat" AS lat, e.color
-    FROM "TerritoryUnit" tu
+  const frame = await frameOf(prisma, matchId);
+  if (frame.outline === "") return { viewBox: frame.viewBox, outline: "", empires: [] };
+  const empires = await prisma.$queryRaw<{ color: string; path: string | null }[]>`
+    SELECT e.color,
+      ST_AsSVG(ST_Simplify(ST_Scale(ST_Union(u."geomSimple"), ${frame.squeeze}, 1), ${frame.tolerance / 2}), 0, 4) AS path
+    FROM "Territory" t
+    JOIN "Empire" e ON e.id = t."ownerEmpireId"
+    JOIN "TerritoryUnit" tu ON tu."territoryId" = t.id
     JOIN "GeoUnit" u ON u.id = tu."geoUnitId"
-    JOIN "Territory" t ON t.id = tu."territoryId"
-    LEFT JOIN "Empire" e ON e.id = t."ownerEmpireId"
-    WHERE tu."matchId" = ${matchId}`;
-  if (units.length === 0) return { columns: 1, rows: 1, free: [], owned: {} };
-
-  const west = Math.min(...units.map((u) => u.lon));
-  const east = Math.max(...units.map((u) => u.lon));
-  const south = Math.min(...units.map((u) => u.lat));
-  const north = Math.max(...units.map((u) => u.lat));
-  // A degree of longitude is shorter than one of latitude, by the cosine of the latitude.
-  const squeeze = Math.cos((((south + north) / 2) * Math.PI) / 180);
-  const width = Math.max((east - west) * squeeze, 1e-6);
-  const height = Math.max(north - south, 1e-6);
-  // About one cell for each municipality, so that a small area is a shape and not a
-  // scattering of dots; a large one stops at the size of the picture.
-  const columns = Math.max(
-    6,
-    Math.min(MAX_COLUMNS, Math.ceil(Math.sqrt((units.length * width) / height) * 0.85)),
-  );
-  const rows = Math.max(1, Math.min(MAX_ROWS, Math.round((columns * height) / width)));
-
-  const cells = new Map<number, Map<string, number>>();
-  for (const unit of units) {
-    const x = Math.min(columns - 1, Math.floor(((unit.lon - west) / (east - west || 1)) * columns));
-    const y = Math.min(rows - 1, Math.floor(((north - unit.lat) / height) * rows));
-    const cell = cells.get(y * columns + x) ?? new Map<string, number>();
-    cell.set(unit.color ?? "", (cell.get(unit.color ?? "") ?? 0) + 1);
-    cells.set(y * columns + x, cell);
-  }
-  const preview: MatchPreview = { columns, rows, free: [], owned: {} };
-  for (const [index, counts] of cells) {
-    // An empire shows even where free municipalities are more: it is what one looks for.
-    const owners = [...counts].filter(([color]) => color !== "").sort((a, b) => b[1] - a[1]);
-    const color = owners[0]?.[0];
-    const target = color ? (preview.owned[color] ??= []) : preview.free;
-    target.push(index % columns, Math.floor(index / columns));
-  }
-  return preview;
+    WHERE t."matchId" = ${matchId}
+    GROUP BY e.id, e.color
+    ORDER BY e."joinedAt"`;
+  return {
+    viewBox: frame.viewBox,
+    outline: frame.outline,
+    empires: empires.flatMap((empire) =>
+      empire.path ? [{ color: empire.color, path: empire.path }] : [],
+    ),
+  };
 }
