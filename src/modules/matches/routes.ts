@@ -23,6 +23,7 @@ import {
   updateMatchBody,
 } from "./schemas.js";
 import { LOGO_MAX_BYTES, LOGO_MIME_TYPES, readLogo } from "./logo.js";
+import { PREVIEW_TTL_MS, matchPreview, type MatchPreview } from "./preview.js";
 import { MatchService } from "./service.js";
 import { z } from "zod";
 
@@ -139,6 +140,27 @@ export function registerMatchRoutes(app: FastifyInstance, deps: MatchRoutesDeps)
   // tiles never change: the count is enough as a version.
 
   const unitCount = async (matchId: string) => prisma.territoryUnit.count({ where: { matchId } });
+
+  /**
+   * A small picture of the match for its card on the homepage: the municipalities
+   * reduced to a grid of cells, each free or of the colour of the empire that holds
+   * most of it. Public like the map itself, and kept for a while: a card need not be
+   * up to the second.
+   */
+  const previews = new Map<string, { at: number; body: Promise<MatchPreview> }>();
+  app.get("/api/matches/:id/preview", async (request, reply) => {
+    const { id } = matchParams.parse(request.params);
+    await matches.get(id, await guard.optional(request));
+    const kept = previews.get(id);
+    const fresh = kept && Date.now() - kept.at < PREVIEW_TTL_MS;
+    const body = fresh ? kept.body : matchPreview(prisma, id);
+    if (!fresh) {
+      if (previews.size > 500) previews.clear();
+      previews.set(id, { at: Date.now(), body });
+      body.catch(() => previews.delete(id));
+    }
+    return reply.header("cache-control", "public, max-age=30").send(await body);
+  });
 
   app.get("/api/matches/:id/map", async (request) => {
     const { id } = matchParams.parse(request.params);
