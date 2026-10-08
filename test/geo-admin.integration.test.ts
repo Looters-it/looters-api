@@ -305,6 +305,32 @@ describe.skipIf(!url)("geo administration", () => {
       expect((await call("GET", "/api/admin/geo/units?q=r")).statusCode).toBe(400);
     });
 
+    it("reports the municipalities without neighbours, per upload and as a list, until they are linked", async () => {
+      const { messina, villa, reggio } = await units();
+      await prisma.geoAdjacency.create({
+        data: { aId: Math.min(villa, reggio), bId: Math.max(villa, reggio) },
+      });
+      const uploads = async () =>
+        (await call("GET", "/api/admin/geo/uploads")).json<
+          { id: string; isolatedCount: number }[]
+        >();
+      const isolated = async () =>
+        (await call("GET", "/api/admin/geo/isolated")).json<{ id: number; name: string }[]>();
+
+      // Messina is across the strait: geometry finds it no neighbour.
+      expect((await uploads())[0]?.isolatedCount).toBe(1);
+      expect(await isolated()).toMatchObject([
+        { id: messina, name: "Messina", area: { name: "Italia" } },
+      ]);
+      const detail = await call("GET", `/api/admin/geo/uploads/${(await uploads())[0]?.id ?? ""}`);
+      expect(detail.json<{ isolatedCount: number }>().isolatedCount).toBe(1);
+
+      await call("POST", "/api/admin/geo/adjacency", { aId: messina, bId: villa });
+      expect((await uploads())[0]?.isolatedCount).toBe(0);
+      expect(await isolated()).toEqual([]);
+      expect((await app.inject({ url: "/api/admin/geo/isolated" })).statusCode).toBe(401);
+    });
+
     it("adds a manual adjacency once, in either order, and lists it", async () => {
       const { messina, villa } = await units();
       const body = { aId: Math.max(messina, villa), bId: Math.min(messina, villa) };

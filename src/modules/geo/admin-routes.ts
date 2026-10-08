@@ -215,14 +215,42 @@ export async function registerGeoAdminRoutes(
     return reply.code(201).send(saved);
   });
 
+  /**
+   * Adds to each upload how many of its municipalities have no neighbour at all:
+   * islands, which geometry cannot connect and the admin has to link by hand before
+   * they can be reached in a match (PROMPT §9 #6).
+   */
+  async function withIsolated<T extends { id: string }>(uploads: T[]) {
+    const counts = await prisma.$queryRaw<{ uploadId: string; n: number }[]>`
+      SELECT u."uploadId", count(*)::int AS n FROM "GeoUnit" u
+      WHERE u."uploadId" IN (${Prisma.join([...uploads.map((upload) => upload.id), ""])})
+        AND NOT EXISTS (SELECT 1 FROM "GeoAdjacency" a WHERE a."aId" = u.id OR a."bId" = u.id)
+      GROUP BY u."uploadId"`;
+    const byUpload = new Map(counts.map((row) => [row.uploadId, row.n]));
+    return uploads.map((upload) => ({ ...upload, isolatedCount: byUpload.get(upload.id) ?? 0 }));
+  }
+
   app.get("/api/admin/geo/uploads", async (request) => {
     await guard.admin(request);
     const { areaId } = uploadsQuery.parse(request.query);
-    return prisma.geoUpload.findMany({
-      where: { areaId, storagePath: { not: "" } },
-      orderBy: { createdAt: "desc" },
-      select: uploadSelect,
-    });
+    return withIsolated(
+      await prisma.geoUpload.findMany({
+        where: { areaId, storagePath: { not: "" } },
+        orderBy: { createdAt: "desc" },
+        select: uploadSelect,
+      }),
+    );
+  });
+
+  /** The municipalities without any neighbour, for the admin to link by hand. */
+  app.get("/api/admin/geo/isolated", async (request) => {
+    await guard.admin(request);
+    return prisma.$queryRaw<{ id: number; name: string; code: string | null; area: object }[]>`
+      SELECT u.id, u.name, u.code, jsonb_build_object('name', a.name) AS area
+      FROM "GeoUnit" u JOIN "GeoArea" a ON a.id = u."areaId"
+      WHERE NOT EXISTS (SELECT 1 FROM "GeoAdjacency" g WHERE g."aId" = u.id OR g."bId" = u.id)
+      ORDER BY a.name, u.name
+      LIMIT 500`;
   });
 
   app.get("/api/admin/geo/uploads/:id", async (request) => {
@@ -230,7 +258,7 @@ export async function registerGeoAdminRoutes(
     const { id } = idParams.parse(request.params);
     const upload = await prisma.geoUpload.findUnique({ where: { id }, select: uploadSelect });
     if (!upload) throw notFound("Upload");
-    return upload;
+    return (await withIsolated([upload]))[0];
   });
 
   /** Deletes an upload with its municipalities, unless a match uses them or it is being processed. */
