@@ -42,7 +42,7 @@ describe.skipIf(!url)("geo administration", () => {
     await prisma.match.deleteMany();
     await prisma.geoArea.deleteMany();
     await prisma.user.deleteMany();
-    uploadDir = await mkdtemp(path.join(tmpdir(), "gioco-uploads-"));
+    uploadDir = await mkdtemp(path.join(tmpdir(), "looters-uploads-"));
     app = await buildApp({
       prisma,
       uploads: { dir: uploadDir, maxMegabytes: 1 },
@@ -86,7 +86,7 @@ describe.skipIf(!url)("geo administration", () => {
 
   /** A multipart request carrying one file. */
   function upload(areaId: string, filename: string, content: string | Buffer) {
-    const boundary = "----gioco-test";
+    const boundary = "----looters-test";
     const body = Buffer.concat([
       Buffer.from(
         `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\n` +

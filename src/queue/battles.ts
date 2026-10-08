@@ -40,7 +40,7 @@ export function encodeBattleResolve(message: BattleResolveMessage): { key: strin
  * whose message is lost is still resolved when its turn closes.
  */
 export function createBattleQueue(options: BattleQueueOptions): BattleQueue {
-  const { brokers, topic, clientId = "gioco-api", onError } = options;
+  const { brokers, topic, clientId = "looters-api", onError } = options;
   const kafka = new Kafka({ clientId, brokers, logLevel: logLevel.NOTHING });
   const producer: Producer = kafka.producer({ idempotent: true, maxInFlightRequests: 1 });
 

@@ -17,12 +17,12 @@ jobs:
       db:
         image: imresamu/postgis:16-3.5-alpine
         env:
-          POSTGRES_USER: gioco
-          POSTGRES_PASSWORD: gioco
-          POSTGRES_DB: gioco_test
+          POSTGRES_USER: looters
+          POSTGRES_PASSWORD: looters
+          POSTGRES_DB: looters_test
         ports: ["5432:5432"]
         options: >-
-          --health-cmd "pg_isready -U gioco -d gioco_test"
+          --health-cmd "pg_isready -U looters -d looters_test"
           --health-interval 5s --health-timeout 5s --health-retries 20
       kafka:
         image: apache/kafka:4.1.0
@@ -41,7 +41,7 @@ jobs:
         ports: ["9092:9092"]
     env:
       # The integration tests are skipped without these: here they must run.
-      TEST_DATABASE_URL: postgresql://gioco:gioco@localhost:5432/gioco_test
+      TEST_DATABASE_URL: postgresql://looters:looters@localhost:5432/looters_test
       TEST_KAFKA_BROKERS: localhost:9092
     steps:
       - uses: actions/checkout@v4
