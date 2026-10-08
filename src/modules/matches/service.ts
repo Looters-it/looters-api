@@ -352,6 +352,56 @@ export class MatchService {
   }
 
   /**
+   * Takes a player out of a match that has not started yet. Their starting
+   * municipality is free again, with a newly drawn hidden endowment: nobody
+   * learns what it holds from having been there. The player may join again,
+   * which is also the way to choose another starting point.
+   */
+  async withdraw(id: string, viewer: AuthContext) {
+    await this.visible(id, viewer);
+    await this.prisma.$transaction(async (tx) => {
+      // Like a join: one at a time for a match.
+      const rows = await tx.$queryRaw<Match[]>`SELECT * FROM "Match" WHERE id = ${id} FOR UPDATE`;
+      const match = rows[0];
+      if (!match) throw notFound("Match");
+      if (match.status !== "OPEN") {
+        throw conflict("MATCH_STARTED", "You can withdraw only before the match starts");
+      }
+      const empire = await tx.empire.findFirst({ where: { matchId: id, userId: viewer.user.id } });
+      if (!empire) throw new AppError(403, "NOT_A_PLAYER", "You have no empire in this match");
+
+      const territories = await tx.territory.findMany({
+        where: { matchId: id, ownerEmpireId: empire.id },
+        select: { id: true, name: true },
+      });
+      const rules = rulesOf(match);
+      for (const territory of territories) {
+        await tx.territory.update({
+          where: { id: territory.id },
+          data: {
+            ownerEmpireId: null,
+            resources: drawHiddenResources(rules, this.random),
+            protectedUntilTurn: null,
+            weight: 1,
+          },
+        });
+      }
+      await tx.allianceInvite.deleteMany({
+        where: { matchId: id, OR: [{ fromEmpireId: empire.id }, { toEmpireId: empire.id }] },
+      });
+      await tx.empire.update({ where: { id: empire.id }, data: { capitalTerritoryId: null } });
+      await tx.empire.delete({ where: { id: empire.id } });
+      await recordEvent(tx, id, match.currentTurn, {
+        type: "EMPIRE_WITHDRAWN",
+        territoryId: territories[0]?.id ?? "",
+        data: { empireName: empire.name, territoryName: territories[0]?.name ?? "" },
+      });
+    });
+    this.onChange(id, "empires");
+    return this.state(id, viewer);
+  }
+
+  /**
    * Enrols the viewer: the chosen municipality becomes the capital of a new
    * empire. Whoever arrives first gets it (PROMPT §9 #5).
    */

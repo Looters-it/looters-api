@@ -13,7 +13,7 @@ import { rulesOf, type MatchService } from "../matches/service.js";
  */
 export const BOARD_KINDS = {
   messages: ["MESSAGE"],
-  empires: ["EMPIRE_CREATED", "EMPIRE_FALLEN"],
+  empires: ["EMPIRE_CREATED", "EMPIRE_WITHDRAWN", "EMPIRE_FALLEN"],
   annexations: ["ANNEXED"],
   battles: ["BATTLE_RESOLVED"],
   capitals: ["CAPITAL_BUILT", "CAPITAL_MOVED", "CAPITAL_PROMOTED"],

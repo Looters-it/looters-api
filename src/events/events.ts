@@ -35,6 +35,12 @@ export type GameEventInput =
       empireId: string;
       data: { empireName: string; otherName: string };
     }
+  | {
+      /** A player left before the start: the empire no longer exists, so it has no id. */
+      type: "EMPIRE_WITHDRAWN";
+      territoryId: string;
+      data: { empireName: string; territoryName: string };
+    }
   | { type: "MESSAGE"; empireId: string; data: { empireName: string; text: string } }
   | { type: "MATCH_OPENED" };
 

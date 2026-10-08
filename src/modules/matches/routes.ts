@@ -87,6 +87,10 @@ export function registerMatchRoutes(app: FastifyInstance, deps: MatchRoutesDeps)
     const { id } = matchParams.parse(request.params);
     return reply.code(201).send(await matches.join(id, joinBody.parse(request.body), auth));
   });
+  app.delete("/api/matches/:id/empire", async (request) => {
+    const auth = await guard.user(request);
+    return matches.withdraw(matchParams.parse(request.params).id, auth);
+  });
   app.patch("/api/matches/:id/empire", async (request) => {
     const auth = await guard.user(request);
     const { id } = matchParams.parse(request.params);

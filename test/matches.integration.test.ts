@@ -472,6 +472,58 @@ describe.skipIf(!url)("matches", () => {
       ).toBe(404);
     });
 
+    it("lets a player withdraw before the start: the municipality is free again, with a new endowment", async () => {
+      const id = await openMatch();
+      await join("anna", id, unitIds[0] ?? 0, { empire: empire("Anna", EMPIRE_COLORS[0]) });
+      await join("bruno", id, unitIds[1] ?? 0, { empire: empire("Bruno", EMPIRE_COLORS[1]) });
+      const territory = async () =>
+        (
+          await prisma.territoryUnit.findFirstOrThrow({
+            where: { matchId: id, geoUnitId: unitIds[0] },
+            include: { territory: true },
+          })
+        ).territory;
+      expect((await territory()).resources).toBeGreaterThanOrEqual(
+        DEFAULT_MATCH_RULES.startResources,
+      );
+
+      expect((await as(null, "DELETE", `/api/matches/${id}/empire`)).statusCode).toBe(401);
+      expect((await as("carla", "DELETE", `/api/matches/${id}/empire`)).json()).toMatchObject({
+        error: { code: "NOT_A_PLAYER" },
+      });
+      const response = await as("anna", "DELETE", `/api/matches/${id}/empire`);
+      expect(response.statusCode, response.body).toBe(200);
+      const after = response.json<{ me: unknown; empires: { name: string }[] }>();
+      expect(after.me).toBeNull();
+      expect(after.empires.map((e) => e.name)).toEqual(["Bruno"]);
+
+      // Free again, unprotected, and holding a hidden endowment as before anyone came:
+      // not the starting resources of the empire that left.
+      const freed = await territory();
+      expect(freed).toMatchObject({ ownerEmpireId: null, protectedUntilTurn: null });
+      expect(freed.resources).toBeLessThan(DEFAULT_MATCH_RULES.startResources);
+      const event = await prisma.gameEvent.findFirstOrThrow({
+        where: { type: "EMPIRE_WITHDRAWN" },
+      });
+      expect(event.data).toEqual({ empireName: "Anna", territoryName: freed.name });
+
+      // The same player can come back, there or elsewhere, and so can anyone else.
+      const again = await join("anna", id, unitIds[2] ?? 0, {
+        empire: empire("Anna", EMPIRE_COLORS[0]),
+      });
+      expect(again.statusCode, again.body).toBe(201);
+      expect(
+        (await join("carla", id, unitIds[0] ?? 0, { empire: empire("Carla", EMPIRE_COLORS[2]) }))
+          .statusCode,
+      ).toBe(201);
+
+      // Once the match runs, nobody walks away.
+      await prisma.match.update({ where: { id }, data: { status: "RUNNING", currentTurn: 1 } });
+      expect((await as("bruno", "DELETE", `/api/matches/${id}/empire`)).json()).toMatchObject({
+        error: { code: "MATCH_STARTED" },
+      });
+    });
+
     it("lets a player restyle the empire before the start, not after", async () => {
       const id = await openMatch();
       await join("anna", id, unitIds[0] ?? 0, { empire: empire("Anna", EMPIRE_COLORS[0]) });
