@@ -513,6 +513,29 @@ export class MatchService {
       },
     });
 
+    // Alliances are public: everyone sees who is allied with whom.
+    const members = await this.prisma.allianceMember.findMany({
+      where: { empire: { matchId: id } },
+      select: { empireId: true, allianceId: true, leavesAtTurn: true },
+    });
+    const myAlliance = mine ? members.find((member) => member.empireId === mine.id) : undefined;
+    const allies = new Set(
+      myAlliance
+        ? members.filter((m) => m.allianceId === myAlliance.allianceId).map((m) => m.empireId)
+        : [],
+    );
+    const invites = mine
+      ? await this.prisma.allianceInvite.findMany({
+          where: {
+            matchId: id,
+            status: "PENDING",
+            OR: [{ toEmpireId: mine.id }, { fromEmpireId: mine.id }],
+          },
+          orderBy: { createdAt: "desc" },
+          select: { id: true, fromEmpireId: true, toEmpireId: true },
+        })
+      : [];
+
     const targets = new Set(
       battles.filter((battle) => battle.status === "OPEN").map((b) => b.targetTerritoryId),
     );
@@ -564,6 +587,9 @@ export class MatchService {
       ),
       territories: territories.map((territory) => {
         const own = mine !== null && territory.ownerEmpireId === mine.id;
+        // Allies see each other's allocations; nobody else does.
+        const ally =
+          !own && territory.ownerEmpireId !== null && allies.has(territory.ownerEmpireId);
         return {
           id: territory.id,
           name: territory.name,
@@ -572,7 +598,7 @@ export class MatchService {
           isArea: territory.isArea,
           protected: (territory.protectedUntilTurn ?? 0) >= currentTurn,
           // Hidden from everyone but the owner: null, never the number.
-          resources: own ? territory.resources : null,
+          resources: own || ally ? territory.resources : null,
           weight: own ? territory.weight : null,
           /** Accumulation alert: public, and it never says how much is there. */
           alert: territory.alert,
@@ -622,6 +648,14 @@ export class MatchService {
             : {}),
         };
       }),
+      alliances: [...new Set(members.map((member) => member.allianceId))].map((allianceId) => ({
+        id: allianceId,
+        members: members
+          .filter((member) => member.allianceId === allianceId)
+          .map((member) => ({ empireId: member.empireId, leavesAtTurn: member.leavesAtTurn })),
+      })),
+      /** Proposals waiting for an answer, made by the viewer or to them. */
+      invites,
       // Structures are public: a block and a second capital are marked on the map for everyone.
       structures: structures.map((structure) => ({
         id: structure.id,

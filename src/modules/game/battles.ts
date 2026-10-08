@@ -5,6 +5,7 @@ import { AppError, notFound } from "../../http/errors.js";
 import { costOf, planAttack } from "../../rules/attack.js";
 import type { MatchRules } from "../../rules/config.js";
 import type { MatchService } from "../matches/service.js";
+import { areAllies } from "./alliances.js";
 import { acting, conflict, lockTerritories, neighboursOf } from "./shared.js";
 
 export const attackBody = z.strictObject({
@@ -79,6 +80,10 @@ export class BattleService {
       throw conflict("TARGET_IS_YOURS", "You cannot attack your own territory");
     }
     const defender = await tx.empire.findUniqueOrThrow({ where: { id: target.ownerEmpireId } });
+    // Allies cannot attack each other, an announced exit included until it takes effect.
+    if (await areAllies(tx, attackerEmpireId, defender.id)) {
+      throw conflict("TARGET_IS_ALLY", "You cannot attack an ally");
+    }
     if ((target.protectedUntilTurn ?? 0) >= currentTurn) {
       throw conflict(
         "TARGET_PROTECTED",

@@ -30,6 +30,12 @@ export type GameEventInput =
       territoryId: string;
       data: { empireName: string; territoryName: string };
     }
+  | {
+      type: "ALLIANCE_FORMED" | "ALLIANCE_JOINED";
+      empireId: string;
+      data: { empireName: string; otherName: string };
+    }
+  | { type: "ALLIANCE_LEFT"; empireId: string; data: { empireName: string } }
   | { type: "MESSAGE"; empireId: string; data: { empireName: string; text: string } }
   | { type: "MATCH_OPENED" };
 

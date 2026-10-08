@@ -5,6 +5,7 @@ import { recordEvent } from "../../events/events.js";
 import { AppError, notFound } from "../../http/errors.js";
 import type { MatchRules } from "../../rules/config.js";
 import type { MatchService } from "../matches/service.js";
+import { areAllies } from "./alliances.js";
 import { acting, conflict, lockTerritories, neighboursOf } from "./shared.js";
 
 type Viewer = AuthContext | null;
@@ -87,6 +88,11 @@ export class GameService {
         : null,
     ]);
     const own = mine !== null && territory.ownerEmpireId === mine.id;
+    const ally =
+      mine !== null &&
+      territory.ownerEmpireId !== null &&
+      !own &&
+      (await areAllies(this.prisma, mine.id, territory.ownerEmpireId));
     const rules = match.config as MatchRules;
 
     let annex = null;
@@ -119,7 +125,7 @@ export class GameService {
 
     // A player looking at an enemy territory: can it be attacked, and from where.
     let attack = null;
-    if (mine && match.status === "RUNNING" && territory.ownerEmpireId && !own) {
+    if (mine && match.status === "RUNNING" && territory.ownerEmpireId && !own && !ally) {
       const ids = [
         ...new Set(neighbours.filter((n) => n.ownerEmpireId === mine.id).map((n) => n.territoryId)),
       ];
@@ -176,8 +182,9 @@ export class GameService {
         ownerEmpireId: territory.ownerEmpireId,
         protected: (territory.protectedUntilTurn ?? 0) >= Math.max(match.currentTurn, 1),
         inBattle: territory.battleLock !== null,
-        // Only the owner sees the amount; for anyone else it is hidden, free territories included.
-        resources: own ? territory.resources : null,
+        // Only the owner and its allies see the amount; for anyone else it is hidden,
+        // free territories included.
+        resources: own || ally ? territory.resources : null,
       },
       neighbours,
       annex,

@@ -13,6 +13,7 @@ import { TileCache } from "./modules/geo/tile-cache.js";
 import { registerHealthRoutes, type HealthDeps } from "./modules/health/routes.js";
 import { registerBoardRoutes } from "./modules/board/routes.js";
 import { BoardService } from "./modules/board/service.js";
+import { AllianceService } from "./modules/game/alliances.js";
 import { BattleService, type ResolutionQueue } from "./modules/game/battles.js";
 import { registerGameRoutes } from "./modules/game/routes.js";
 import { GameService } from "./modules/game/service.js";
@@ -119,7 +120,9 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   };
   const structures = new StructureService(deps.prisma, matches);
   structures.onChange = matches.onChange;
-  registerGameRoutes(app, game, battles, structures, guard);
+  const alliances = new AllianceService(deps.prisma, matches);
+  alliances.onChange = matches.onChange;
+  registerGameRoutes(app, game, battles, structures, alliances, guard);
   const board = new BoardService(deps.prisma, matches);
   board.onChange = matches.onChange;
   registerBoardRoutes(app, board, guard);

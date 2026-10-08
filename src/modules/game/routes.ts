@@ -9,6 +9,7 @@ import {
   renameBody,
   type StructureService,
 } from "./structures.js";
+import { chatBody, inviteBody, transferBody, type AllianceService } from "./alliances.js";
 import { attackBody, attackPreviewBody, respondBody, type BattleService } from "./battles.js";
 import {
   allocateBody,
@@ -23,6 +24,7 @@ const unitParams = matchParams.extend({ geoUnitId: z.coerce.number().int().posit
 
 const battleParams = matchParams.extend({ battleId: z.string().min(1) });
 
+const inviteParams = matchParams.extend({ inviteId: z.string().min(1) });
 const structureParams = matchParams.extend({ structureId: z.string().min(1) });
 const territoryParams = matchParams.extend({ territoryId: z.string().min(1) });
 
@@ -31,6 +33,7 @@ export function registerGameRoutes(
   game: GameService,
   battles: BattleService,
   structures: StructureService,
+  alliances: AllianceService,
   guard: AuthGuard,
 ): void {
   app.get("/api/matches/:id/units/:geoUnitId", async (request) => {
@@ -114,5 +117,38 @@ export function registerGameRoutes(
     const auth = await guard.user(request);
     const { id, territoryId } = territoryParams.parse(request.params);
     return structures.rename(id, territoryId, renameBody.parse(request.body), auth);
+  });
+
+  // ---------- Alliances ----------
+
+  app.post("/api/matches/:id/alliances/invites", async (request, reply) => {
+    const auth = await guard.user(request);
+    const { id } = matchParams.parse(request.params);
+    return reply.code(201).send(await alliances.invite(id, inviteBody.parse(request.body), auth));
+  });
+  for (const action of ["accept", "decline", "withdraw"] as const) {
+    app.post(`/api/matches/:id/alliances/invites/:inviteId/${action}`, async (request) => {
+      const auth = await guard.user(request);
+      const { id, inviteId } = inviteParams.parse(request.params);
+      return alliances.answer(id, inviteId, action, auth);
+    });
+  }
+  app.post("/api/matches/:id/alliances/leave", async (request) => {
+    const auth = await guard.user(request);
+    return alliances.leave(matchParams.parse(request.params).id, auth);
+  });
+  app.post("/api/matches/:id/alliances/transfer", async (request) => {
+    const auth = await guard.user(request);
+    const { id } = matchParams.parse(request.params);
+    return alliances.transfer(id, transferBody.parse(request.body), auth);
+  });
+  app.get("/api/matches/:id/alliances/chat", async (request) => {
+    const auth = await guard.user(request);
+    return alliances.chat(matchParams.parse(request.params).id, auth);
+  });
+  app.post("/api/matches/:id/alliances/chat", async (request, reply) => {
+    const auth = await guard.user(request);
+    const { id } = matchParams.parse(request.params);
+    return reply.code(201).send(await alliances.say(id, chatBody.parse(request.body), auth));
   });
 }
