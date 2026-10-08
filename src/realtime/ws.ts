@@ -2,7 +2,21 @@ import websocket from "@fastify/websocket";
 import type { FastifyInstance } from "fastify";
 import type { AuthGuard } from "../auth/guard.js";
 import type { AuthContext } from "../auth/sessions.js";
-import type { RealtimeHub } from "./hub.js";
+import { z } from "zod";
+import type { Connection, RealtimeHub } from "./hub.js";
+
+const clientMessage = z.object({
+  t: z.enum(["sub", "unsub"]),
+  matchId: z.string().min(1).max(64),
+});
+
+function parseJson(data: Buffer): unknown {
+  try {
+    return JSON.parse(data.toString("utf8"));
+  } catch {
+    return null;
+  }
+}
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -20,6 +34,8 @@ export async function registerWebSocket(
   app: FastifyInstance,
   hub: RealtimeHub,
   guard: AuthGuard,
+  /** Whether a user has an empire still in play in a match. */
+  isPlayer: (matchId: string, userId: string) => Promise<boolean>,
 ): Promise<void> {
   await app.register(websocket, { options: { maxPayload: 16 * 1024 } });
 
@@ -36,7 +52,7 @@ export async function registerWebSocket(
       const auth = request.wsAuth ?? null;
       let alive = true;
 
-      const remove = hub.add({
+      const connection: Connection = {
         userId: auth?.user.id ?? null,
         sessionId: auth?.sessionId ?? null,
         expiresAt: auth?.expiresAt ?? null,
@@ -46,6 +62,26 @@ export async function registerWebSocket(
         close: (code, reason) => {
           socket.close(code, reason);
         },
+      };
+      const remove = hub.add(connection);
+
+      // Client messages: {t:"sub",matchId} and {t:"unsub",matchId}.
+      socket.on("message", (data: Buffer) => {
+        const message = clientMessage.safeParse(parseJson(data));
+        if (!message.success) return;
+        const { t, matchId } = message.data;
+        if (t === "unsub") {
+          hub.unsubscribe(connection, matchId);
+          return;
+        }
+        const userId = auth?.user.id;
+        void (userId ? isPlayer(matchId, userId) : Promise.resolve(false))
+          .then((player) => {
+            if (socket.readyState === socket.OPEN) hub.subscribe(connection, matchId, player);
+          })
+          .catch((error: unknown) => {
+            request.log.error({ err: error }, "match subscription failed");
+          });
       });
 
       // Drop sockets whose peer vanished without closing.

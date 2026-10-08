@@ -11,10 +11,19 @@ import { registerGeoAdminRoutes } from "./modules/geo/admin-routes.js";
 import { registerGeoPublicRoutes } from "./modules/geo/public-routes.js";
 import { TileCache } from "./modules/geo/tile-cache.js";
 import { registerHealthRoutes, type HealthDeps } from "./modules/health/routes.js";
+import { registerGameRoutes } from "./modules/game/routes.js";
+import { GameService } from "./modules/game/service.js";
 import { registerMatchRoutes } from "./modules/matches/routes.js";
+import { MatchService } from "./modules/matches/service.js";
 import { registerStatsRoutes } from "./modules/stats/routes.js";
 import { RealtimeHub } from "./realtime/hub.js";
 import { registerWebSocket } from "./realtime/ws.js";
+
+declare module "fastify" {
+  interface FastifyInstance {
+    realtime: RealtimeHub;
+  }
+}
 
 export interface AuthConfig {
   cookieName: string;
@@ -81,9 +90,25 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   // One cache for every kind of tile: keys carry what they belong to.
   const tileCache = new TileCache((deps.tileCacheMegabytes ?? 64) * 1_048_576);
   registerGeoPublicRoutes(app, { prisma: deps.prisma, tileCache });
-  registerMatchRoutes(app, { prisma: deps.prisma, guard, tileCache });
+  const matches = new MatchService(deps.prisma);
+  matches.onChange = (matchId, kind) => {
+    hub.matchChanged(matchId, kind);
+  };
+  matches.matchOnline = (matchId) => hub.matchOnline(matchId);
+  const game = new GameService(deps.prisma, matches);
+  game.onChange = matches.onChange;
+  registerMatchRoutes(app, { prisma: deps.prisma, guard, tileCache, service: matches });
+  registerGameRoutes(app, game, guard);
   registerStatsRoutes(app, hub);
-  await registerWebSocket(app, hub, guard);
+  await registerWebSocket(app, hub, guard, async (matchId, userId) => {
+    const empires = await deps.prisma.empire.count({
+      where: { matchId, userId, status: "ACTIVE" },
+    });
+    return empires > 0;
+  });
+
+  // What `jobs` announces (a turn closed, a match started) reaches the followers of the match.
+  app.decorate("realtime", hub);
 
   return app;
 }

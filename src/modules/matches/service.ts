@@ -6,6 +6,7 @@ import { AppError, forbidden, notFound } from "../../http/errors.js";
 import { enqueueJob } from "../../queue/jobs.js";
 import { matchRulesSchema, resolveMatchRules, type MatchRules } from "../../rules/config.js";
 import { drawHiddenResources, secureRandom, type Random } from "../../rules/hidden-resources.js";
+import { turnIncome } from "../../rules/income.js";
 import type { z } from "zod";
 import {
   OPEN_EDITABLE,
@@ -77,6 +78,11 @@ function summary(row: SummaryRow, viewer: Viewer) {
 }
 
 export class MatchService {
+  /** Called after a change that the followers of a match should see. */
+  onChange: (matchId: string, kind: string) => void = () => undefined;
+  /** Players of a match that are watching it right now. */
+  matchOnline: (matchId: string) => number = () => 0;
+
   constructor(
     private readonly prisma: PrismaClient,
     private readonly random: Random = secureRandom,
@@ -292,6 +298,7 @@ export class MatchService {
       },
       { timeout: 60_000 },
     );
+    this.onChange(id, "match");
     return this.get(id, viewer);
   }
 
@@ -385,6 +392,7 @@ export class MatchService {
         data: { empireName: empire.name, territoryName: territory.name },
       });
     });
+    this.onChange(id, "empires");
     return this.state(id, viewer);
   }
 
@@ -402,6 +410,7 @@ export class MatchService {
       await this.assertIdentityFree(tx, id, body, empire.id);
       await tx.empire.update({ where: { id: empire.id }, data: body });
     });
+    this.onChange(id, "empires");
     return this.state(id, viewer);
   }
 
@@ -425,6 +434,8 @@ export class MatchService {
           status: true,
           userId: true,
           capitalTerritoryId: true,
+          annexedThisTurn: true,
+          allocationMode: true,
           user: { select: { username: true } },
         },
       }),
@@ -436,6 +447,7 @@ export class MatchService {
           ownerEmpireId: true,
           resources: true,
           protectedUntilTurn: true,
+          weight: true,
           isArea: true,
           units: { select: { geoUnitId: true } },
         },
@@ -443,26 +455,55 @@ export class MatchService {
     ]);
     const mine = empires.find((empire) => empire.userId === viewer?.user.id) ?? null;
     const currentTurn = Math.max(match.currentTurn, 1);
+    const rules = rulesOf(match);
+    const unitsOf = (empireId: string) =>
+      territories
+        .filter((territory) => territory.ownerEmpireId === empireId)
+        .reduce((sum, territory) => sum + territory.units.length, 0);
 
     return {
       match: summary(match, viewer),
-      me: mine ? { empireId: mine.id } : null,
-      empires: empires.map(({ userId: _userId, user, ...empire }) => ({
-        ...empire,
-        username: user.username,
-        units: territories
-          .filter((territory) => territory.ownerEmpireId === empire.id)
-          .reduce((sum, territory) => sum + territory.units.length, 0),
-      })),
-      territories: territories.map((territory) => ({
-        id: territory.id,
-        name: territory.name,
-        ownerEmpireId: territory.ownerEmpireId,
-        geoUnitIds: territory.units.map((unit) => unit.geoUnitId),
-        isArea: territory.isArea,
-        protected: (territory.protectedUntilTurn ?? 0) >= currentTurn,
-        resources: mine && territory.ownerEmpireId === mine.id ? territory.resources : null,
-      })),
+      me: mine
+        ? {
+            empireId: mine.id,
+            /** Annexations still available this turn. */
+            annexLeft: Math.max(0, rules.annexPerTurn - mine.annexedThisTurn),
+            /** What the empire earns at the end of this turn. */
+            turnValue: turnIncome(rules, unitsOf(mine.id)),
+            allocationMode: mine.allocationMode,
+          }
+        : null,
+      empires: empires.map(
+        ({
+          userId: _userId,
+          user,
+          annexedThisTurn: _annexed,
+          allocationMode: _mode,
+          ...empire
+        }) => ({
+          ...empire,
+          username: user.username,
+          units: unitsOf(empire.id),
+        }),
+      ),
+      territories: territories.map((territory) => {
+        const own = mine !== null && territory.ownerEmpireId === mine.id;
+        return {
+          id: territory.id,
+          name: territory.name,
+          ownerEmpireId: territory.ownerEmpireId,
+          geoUnitIds: territory.units.map((unit) => unit.geoUnitId),
+          isArea: territory.isArea,
+          protected: (territory.protectedUntilTurn ?? 0) >= currentTurn,
+          // Hidden from everyone but the owner: null, never the number.
+          resources: own ? territory.resources : null,
+          weight: own ? territory.weight : null,
+        };
+      }),
+      online: {
+        connected: this.matchOnline(id),
+        total: empires.filter((empire) => empire.status === "ACTIVE").length,
+      },
     };
   }
 }

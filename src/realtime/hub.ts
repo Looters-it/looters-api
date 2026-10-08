@@ -2,7 +2,13 @@
 export const CLOSE_SESSION_ENDED = 4401;
 
 /** Messages the server pushes to clients (docs/ARCHITECTURE.md, WebSocket). */
-export type ServerMessage = { t: "online"; n: number } | { t: "session.revoked" };
+export type ServerMessage =
+  | { t: "online"; n: number }
+  | { t: "session.revoked" }
+  /** Something of the match changed: the client reads its state again. */
+  | { t: "match.update"; matchId: string; kinds: string[] }
+  /** Players of the match connected right now, out of those still in play. */
+  | { t: "match.online"; matchId: string; connected: number };
 
 /** One open socket, authenticated or anonymous. */
 export interface Connection {
@@ -11,6 +17,11 @@ export interface Connection {
   expiresAt: Date | null;
   send(data: string): void;
   close(code: number, reason: string): void;
+  /**
+   * Matches this socket follows; the value says whether its user plays in
+   * the match (has an active empire), which is what the match counter counts.
+   */
+  matches?: Map<string, boolean>;
 }
 
 /**
@@ -27,7 +38,9 @@ export class RealtimeHub {
     connection.send(JSON.stringify({ t: "online", n: this.onlineCount() } satisfies ServerMessage));
     this.announceIfChanged();
     return () => {
-      if (this.connections.delete(connection)) this.announceIfChanged();
+      if (!this.connections.delete(connection)) return;
+      this.announceIfChanged();
+      for (const matchId of connection.matches?.keys() ?? []) this.announceMatch(matchId);
     };
   }
 
@@ -57,6 +70,48 @@ export class RealtimeHub {
     this.closeWhere((connection) => connection.expiresAt !== null && connection.expiresAt <= now);
   }
 
+  // ---------- Matches ----------
+
+  /** Starts sending the socket what happens in a match. */
+  subscribe(connection: Connection, matchId: string, isPlayer: boolean): void {
+    (connection.matches ??= new Map()).set(matchId, isPlayer);
+    this.announceMatch(matchId);
+  }
+
+  unsubscribe(connection: Connection, matchId: string): void {
+    if (connection.matches?.delete(matchId)) this.announceMatch(matchId);
+  }
+
+  /** Distinct players of the match that are watching it right now. */
+  matchOnline(matchId: string): number {
+    const users = new Set<string>();
+    for (const connection of this.connections) {
+      if (connection.userId && connection.matches?.get(matchId)) users.add(connection.userId);
+    }
+    return users.size;
+  }
+
+  /** Sends a message to every socket that follows the match. */
+  publish(matchId: string, message: ServerMessage): void {
+    const data = JSON.stringify(message);
+    for (const connection of this.connections) {
+      if (connection.matches?.has(matchId)) connection.send(data);
+    }
+  }
+
+  /** Tells the followers of a match that it changed. `kinds` hints at what. */
+  matchChanged(matchId: string, ...kinds: string[]): void {
+    this.publish(matchId, { t: "match.update", matchId, kinds });
+  }
+
+  private readonly lastMatchOnline = new Map<string, number>();
+  private announceMatch(matchId: string): void {
+    const connected = this.matchOnline(matchId);
+    if (this.lastMatchOnline.get(matchId) === connected) return;
+    this.lastMatchOnline.set(matchId, connected);
+    this.publish(matchId, { t: "match.online", matchId, connected });
+  }
+
   broadcast(message: ServerMessage): void {
     const data = JSON.stringify(message);
     for (const connection of this.connections) connection.send(data);
@@ -69,6 +124,7 @@ export class RealtimeHub {
       this.connections.delete(connection);
       connection.send(JSON.stringify({ t: "session.revoked" } satisfies ServerMessage));
       connection.close(CLOSE_SESSION_ENDED, "session ended");
+      for (const matchId of connection.matches?.keys() ?? []) this.announceMatch(matchId);
       closed = true;
     }
     if (closed) this.announceIfChanged();

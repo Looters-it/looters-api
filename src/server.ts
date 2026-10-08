@@ -51,6 +51,8 @@ const listener = listenForNotifications({
       lastJobsPongAt = new Date();
       app.log.info("jobs service replied to ping");
     }
+    // A turn closed or a match started: its followers read the state again.
+    if (notification.matchId) app.realtime.matchChanged(notification.matchId, notification.kind);
   },
   onError: (error) => {
     app.log.error({ err: error }, "notification listener error");
