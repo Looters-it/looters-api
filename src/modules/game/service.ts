@@ -26,6 +26,12 @@ export const allocateBody = z.strictObject({
   turn,
 });
 
+export const capitalBody = z.strictObject({
+  /** The own territory that becomes the capital. */
+  territoryId: z.string().min(1),
+  turn,
+});
+
 export const allocationRuleBody = z.strictObject({
   mode: z.enum(["EQUAL", "WEIGHTED"]),
   /** Weight of each territory in the split of the income, for the weighted mode. */
@@ -304,6 +310,50 @@ export class GameService {
       }
     });
     this.onChange(matchId, "resources");
+    return this.matches.state(matchId, viewer);
+  }
+
+  /**
+   * Moves the capital to another territory of the empire (PROMPT §2.9): at
+   * most once every `capitalMoveEveryTurns` turns, and not while the old or
+   * the new capital is in a battle.
+   */
+  async moveCapital(matchId: string, body: z.infer<typeof capitalBody>, viewer: AuthContext) {
+    await this.prisma.$transaction(async (tx) => {
+      const { match, empire, rules } = await acting(tx, matchId, viewer, body.turn);
+      if (empire.capitalTerritoryId === body.territoryId) {
+        throw conflict("ALREADY_CAPITAL", "This territory is already the capital");
+      }
+      if (
+        empire.lastCapitalMoveTurn !== null &&
+        match.currentTurn - empire.lastCapitalMoveTurn < rules.capitalMoveEveryTurns
+      ) {
+        throw conflict("CAPITAL_MOVED_RECENTLY", "The capital cannot move again yet");
+      }
+      const ids = [
+        body.territoryId,
+        ...(empire.capitalTerritoryId ? [empire.capitalTerritoryId] : []),
+      ];
+      const locked = await lockTerritories(tx, matchId, ids);
+      const destination = locked.find((territory) => territory.id === body.territoryId);
+      if (destination?.ownerEmpireId !== empire.id) {
+        throw conflict("NOT_YOUR_TERRITORY", "The capital can move only to your own territory");
+      }
+      if (locked.some((territory) => territory.inBattle)) {
+        throw conflict("TERRITORY_IN_BATTLE", "The capital cannot move during a battle on it");
+      }
+      await tx.empire.update({
+        where: { id: empire.id },
+        data: { capitalTerritoryId: destination.id, lastCapitalMoveTurn: match.currentTurn },
+      });
+      await recordEvent(tx, matchId, match.currentTurn, {
+        type: "CAPITAL_MOVED",
+        empireId: empire.id,
+        territoryId: destination.id,
+        data: { empireName: empire.name, territoryName: destination.name },
+      });
+    });
+    this.onChange(matchId, "empires");
     return this.matches.state(matchId, viewer);
   }
 }

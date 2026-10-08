@@ -59,6 +59,8 @@ enum BattleOutcome {
   ATTACKER_WON
   DEFENDER_WON
   SURRENDER
+  // Never fought: one of the two empires fell while it was open.
+  CANCELLED
 }
 
 enum AllianceInviteStatus {

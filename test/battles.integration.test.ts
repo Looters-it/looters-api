@@ -220,7 +220,13 @@ describe.skipIf(!url)("battles", () => {
       });
       // Two territories: 60% of each, rounded up. 41 -> 25, 10 -> 6.
       expect(preview.json()).toMatchObject({ pct: 60, totalCost: 31, force: 51 });
-      expect(preview.body).not.toContain("80"); // nothing about the defender
+      // Nothing about the defender: only the attacker's own territories and numbers.
+      expect(Object.keys(preview.json<object>()).sort()).toEqual([
+        "force",
+        "from",
+        "pct",
+        "totalCost",
+      ]);
       // A preview changes nothing.
       expect(await prisma.battle.count()).toBe(0);
       expect((await territoryOf(1)).resources).toBe(41);

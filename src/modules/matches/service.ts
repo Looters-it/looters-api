@@ -45,6 +45,8 @@ const summarySelect = {
   turnHours: true,
   currentTurn: true,
   turnEndsAt: true,
+  finishedAt: true,
+  winnerEmpireId: true,
   inviteCode: true,
   config: true,
   ownerId: true,
@@ -67,6 +69,8 @@ function summary(row: SummaryRow, viewer: Viewer) {
     turnHours: row.turnHours,
     currentTurn: row.currentTurn,
     turnEndsAt: row.turnEndsAt,
+    finishedAt: row.finishedAt,
+    winnerEmpireId: row.winnerEmpireId,
     players: row._count.empires,
     hasInviteCode: row.inviteCode !== null,
     owner: row.owner.username,
@@ -437,6 +441,8 @@ export class MatchService {
           capitalTerritoryId: true,
           annexedThisTurn: true,
           allocationMode: true,
+          lastCapitalMoveTurn: true,
+          fallenTurn: true,
           user: { select: { username: true } },
         },
       }),
@@ -449,6 +455,7 @@ export class MatchService {
           resources: true,
           protectedUntilTurn: true,
           weight: true,
+          alert: true,
           isArea: true,
           battleLock: { select: { battleId: true } },
           units: { select: { geoUnitId: true } },
@@ -507,6 +514,16 @@ export class MatchService {
             /** What the empire earns at the end of this turn. */
             turnValue: turnIncome(rules, unitsOf(mine.id)),
             allocationMode: mine.allocationMode,
+            /** FALLEN: the player stays as a spectator and can no longer act. */
+            status: mine.status,
+            /** Turns to wait before the capital can move again; 0 when it can move now. */
+            capitalMoveInTurns:
+              mine.lastCapitalMoveTurn === null
+                ? 0
+                : Math.max(
+                    0,
+                    mine.lastCapitalMoveTurn + rules.capitalMoveEveryTurns - match.currentTurn,
+                  ),
           }
         : null,
       empires: empires.map(
@@ -515,11 +532,21 @@ export class MatchService {
           user,
           annexedThisTurn: _annexed,
           allocationMode: _mode,
+          lastCapitalMoveTurn: _moved,
           ...empire
         }) => ({
           ...empire,
           username: user.username,
           units: unitsOf(empire.id),
+          // Total resources stay hidden for the whole match and are revealed when it
+          // ends (PROMPT §9 #10).
+          ...(match.status === "FINISHED"
+            ? {
+                resources: territories
+                  .filter((territory) => territory.ownerEmpireId === empire.id)
+                  .reduce((sum, territory) => sum + territory.resources, 0),
+              }
+            : {}),
         }),
       ),
       territories: territories.map((territory) => {
@@ -534,6 +561,8 @@ export class MatchService {
           // Hidden from everyone but the owner: null, never the number.
           resources: own ? territory.resources : null,
           weight: own ? territory.weight : null,
+          /** Accumulation alert: public, and it never says how much is there. */
+          alert: territory.alert,
           /**
            * The open battle it is involved in. A target is marked for everyone; which
            * territories an attack starts from is known to the attacker alone.

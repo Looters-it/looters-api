@@ -2,7 +2,13 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { AuthGuard } from "../../auth/guard.js";
 import { attackBody, attackPreviewBody, respondBody, type BattleService } from "./battles.js";
-import { allocateBody, allocationRuleBody, annexBody, type GameService } from "./service.js";
+import {
+  allocateBody,
+  allocationRuleBody,
+  annexBody,
+  capitalBody,
+  type GameService,
+} from "./service.js";
 
 const matchParams = z.object({ id: z.string().min(1) });
 const unitParams = matchParams.extend({ geoUnitId: z.coerce.number().int().positive() });
@@ -36,6 +42,12 @@ export function registerGameRoutes(
     const auth = await guard.user(request);
     const { id } = matchParams.parse(request.params);
     return game.setAllocationRule(id, allocationRuleBody.parse(request.body), auth);
+  });
+
+  app.post("/api/matches/:id/capital", async (request) => {
+    const auth = await guard.user(request);
+    const { id } = matchParams.parse(request.params);
+    return game.moveCapital(id, capitalBody.parse(request.body), auth);
   });
 
   app.post("/api/matches/:id/attacks/preview", async (request) => {
