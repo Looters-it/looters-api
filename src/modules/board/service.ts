@@ -34,6 +34,20 @@ export const boardQuery = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(40),
 });
 
+/** What the history of a turn lists: every announcement, not the players' messages. */
+const HISTORY_TYPES = ALL_TYPES.filter((type) => type !== "MESSAGE");
+
+interface EventRow {
+  id: string;
+  type: string;
+  turn: number;
+  createdAt: Date;
+  empireId: string | null;
+  territoryId: string | null;
+  geoUnitId: number | null;
+  data: Prisma.JsonValue;
+}
+
 export const messageBody = z.strictObject({ text: z.string().trim().min(1).max(5000) });
 
 export class BoardService {
@@ -84,6 +98,53 @@ export class BoardService {
       ORDER BY e."createdAt" DESC, e.id DESC
       LIMIT ${query.limit}`;
     return rows;
+  }
+
+  /**
+   * The closed turns of a match, newest first, with how many things happened
+   * in each (PROMPT §2.12). A turn is closed when its snapshot exists.
+   */
+  async history(matchId: string, viewer: AuthContext | null) {
+    await this.matches.get(matchId, viewer);
+    return this.prisma.$queryRaw<{ turn: number; closedAt: Date; events: number }[]>`
+      SELECT s.turn, s."createdAt" AS "closedAt",
+        (SELECT count(*)::int FROM "GameEvent" e
+          WHERE e."matchId" = s."matchId" AND e."isPublic"
+            -- What happened before the start (the empires being founded) belongs to the first turn.
+            AND (e.turn = s.turn OR (s.turn = 1 AND e.turn < 1))
+            AND e.type = ANY(${HISTORY_TYPES})) AS events
+      FROM "TurnSnapshot" s
+      WHERE s."matchId" = ${matchId}
+      ORDER BY s.turn DESC`;
+  }
+
+  /**
+   * A closed turn: what happened in it, in order, and who owned each
+   * municipality when it ended. Like the board it carries names and outcomes
+   * only: the resources of that moment are not kept anywhere, so nothing of
+   * another empire can leak from the past.
+   */
+  async turn(matchId: string, turn: number, viewer: AuthContext | null) {
+    await this.matches.get(matchId, viewer);
+    const snapshot = await this.prisma.turnSnapshot.findUnique({
+      where: { matchId_turn: { matchId, turn } },
+    });
+    if (!snapshot) throw notFound("Turn");
+    const events = await this.prisma.$queryRaw<EventRow[]>`
+      SELECT e.id, e.type, e.turn, e."createdAt", e."empireId", e."territoryId", e.data,
+        (SELECT min(tu."geoUnitId") FROM "TerritoryUnit" tu WHERE tu."territoryId" = e."territoryId") AS "geoUnitId"
+      FROM "GameEvent" e
+      WHERE e."matchId" = ${matchId} AND e."isPublic"
+        AND (e.turn = ${turn} OR (${turn} = 1 AND e.turn < 1))
+        AND e.type = ANY(${HISTORY_TYPES})
+      ORDER BY e."createdAt", e.id`;
+    return {
+      turn,
+      closedAt: snapshot.createdAt,
+      events,
+      /** Municipality id → the empire that owned it; free municipalities are absent. */
+      ownership: snapshot.ownership as Record<string, string>,
+    };
   }
 
   /**

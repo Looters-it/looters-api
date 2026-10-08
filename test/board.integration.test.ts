@@ -236,6 +236,105 @@ describe.skipIf(!url)("board", () => {
     expect(Object.values(BOARD_KINDS).flat()).toContain("BATTLE_RESOLVED");
   });
 
+  describe("history of the turns", () => {
+    interface Turn {
+      turn: number;
+      events: Entry[];
+      ownership: Record<string, string>;
+    }
+    // What jobs does when a turn closes: the snapshot of who owns what, then the next turn.
+    const closeTurn = async () => {
+      await prisma.$executeRaw`
+        INSERT INTO "TurnSnapshot" ("matchId", turn, ownership)
+        SELECT m.id, m."currentTurn",
+          coalesce(jsonb_object_agg(tu."geoUnitId"::text, t."ownerEmpireId"), '{}'::jsonb)
+        FROM "Match" m
+        JOIN "Territory" t ON t."matchId" = m.id AND t."ownerEmpireId" IS NOT NULL
+        JOIN "TerritoryUnit" tu ON tu."territoryId" = t.id
+        WHERE m.id = ${matchId} GROUP BY m.id`;
+      await prisma.match.update({
+        where: { id: matchId },
+        data: { currentTurn: { increment: 1 } },
+      });
+    };
+    it("lists the closed turns, newest first, and not the one being played", async () => {
+      await closeTurn();
+      await post("anna", "Un messaggio nel secondo turno");
+      await closeTurn();
+
+      const turns = (await as(null, "GET", `/api/matches/${matchId}/history`)).json<
+        { turn: number; events: number; closedAt: string }[]
+      >();
+      expect(turns.map((entry) => entry.turn)).toEqual([2, 1]);
+      // Messages are not part of the history: the second turn had nothing else.
+      expect(turns[0]?.events).toBe(0);
+      expect(turns[1]?.events).toBeGreaterThan(0);
+    });
+
+    it("gives the events of a turn in order and who owned what when it ended", async () => {
+      const empires = await prisma.empire.findMany({ where: { matchId } });
+      const anna = empires.find((empire) => empire.name === "Impero di anna");
+      const bruno = empires.find((empire) => empire.name === "Impero di bruno");
+      const payFrom = await territoryId(0);
+      await prisma.territory.update({ where: { id: payFrom }, data: { resources: 5000 } });
+
+      await closeTurn();
+      const annexed = await as("anna", "POST", `/api/matches/${matchId}/annex`, {
+        geoUnitId: unit[1],
+        payFromTerritoryId: payFrom,
+        turn: 2,
+      });
+      expect(annexed.statusCode).toBeLessThan(300);
+      await closeTurn();
+
+      const first = (await as(null, "GET", `/api/matches/${matchId}/history/1`)).json<Turn>();
+      expect(first.ownership).toEqual({
+        [String(unit[0])]: anna?.id,
+        [String(unit[3])]: bruno?.id,
+      });
+      const second = (await as("bruno", "GET", `/api/matches/${matchId}/history/2`)).json<Turn>();
+      expect(second.ownership[String(unit[1])]).toBe(anna?.id);
+      expect(second.events.map((event) => event.type)).toEqual(["ANNEXED"]);
+      expect(second.events[0]?.geoUnitId).toBe(unit[1]);
+      // The past is not rewritten by what came after.
+      expect(first.ownership[String(unit[1])]).toBeUndefined();
+    });
+
+    it("never carries resources: only names, outcomes and owners", async () => {
+      await closeTurn();
+      const response = await as("bruno", "GET", `/api/matches/${matchId}/history/1`);
+      const turn = response.json<Turn>();
+      expect(Object.keys(turn).sort()).toEqual(["closedAt", "events", "ownership", "turn"]);
+      for (const event of turn.events) {
+        expect(Object.keys(event).sort()).toEqual(
+          [
+            "createdAt",
+            "data",
+            "empireId",
+            "geoUnitId",
+            "id",
+            "territoryId",
+            "turn",
+            "type",
+          ].sort(),
+        );
+        for (const value of Object.values(event.data)) expect(typeof value).toBe("string");
+      }
+      for (const owner of Object.values(turn.ownership)) expect(typeof owner).toBe("string");
+    });
+
+    it("answers 404 for the turn being played, a turn never played and a draft", async () => {
+      await closeTurn();
+      const status = async (route: string) => (await as(null, "GET", route)).statusCode;
+      expect(await status(`/api/matches/${matchId}/history/2`)).toBe(404);
+      expect(await status(`/api/matches/${matchId}/history/99`)).toBe(404);
+      expect(await status(`/api/matches/${matchId}/history/0`)).toBe(400);
+      await prisma.match.update({ where: { id: matchId }, data: { status: "DRAFT" } });
+      expect(await status(`/api/matches/${matchId}/history`)).toBe(404);
+      expect(await status(`/api/matches/${matchId}/history/1`)).toBe(404);
+    });
+  });
+
   describe("messages", () => {
     it("posts a message in the name of the player's empire", async () => {
       const response = await post("anna", "  Di qua dal fiume non si passa.  ");

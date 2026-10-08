@@ -4,6 +4,7 @@ import type { AuthGuard } from "../../auth/guard.js";
 import { boardQuery, messageBody, type BoardService } from "./service.js";
 
 const matchParams = z.object({ id: z.string().min(1) });
+const turnParams = matchParams.extend({ turn: z.coerce.number().int().min(1) });
 const eventParams = matchParams.extend({ eventId: z.string().min(1) });
 
 export function registerBoardRoutes(
@@ -18,6 +19,15 @@ export function registerBoardRoutes(
       await guard.optional(request),
     ),
   );
+
+  app.get("/api/matches/:id/history", async (request) =>
+    board.history(matchParams.parse(request.params).id, await guard.optional(request)),
+  );
+
+  app.get("/api/matches/:id/history/:turn", async (request) => {
+    const { id, turn } = turnParams.parse(request.params);
+    return board.turn(id, turn, await guard.optional(request));
+  });
 
   app.post("/api/matches/:id/board", async (request, reply) => {
     const auth = await guard.user(request);
