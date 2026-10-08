@@ -7,7 +7,7 @@ import { enqueueJob } from "./queue/jobs.js";
 import { listenForNotifications } from "./queue/notifications.js";
 
 const env = loadServerEnv();
-const prisma = createPrisma(env.DATABASE_URL);
+const prisma = createPrisma(env.DATABASE_URL, env.DATABASE_POOL_SIZE);
 
 let lastJobsPongAt: Date | null = null;
 
@@ -23,6 +23,8 @@ const app = await buildApp({
   prisma,
   logger: { level: env.LOG_LEVEL, redact: REDACTED_PATHS },
   trustProxy: env.TRUST_PROXY,
+  matchUpdateWindowMs: env.MATCH_UPDATE_WINDOW_MS,
+  matchStateCacheMs: env.MATCH_STATE_CACHE_MS,
   uploads: { dir: env.UPLOAD_DIR, maxMegabytes: env.UPLOAD_MAX_MB },
   tileCacheMegabytes: env.TILE_CACHE_MB,
   battleQueue,
@@ -53,7 +55,7 @@ const listener = listenForNotifications({
       app.log.info("jobs service replied to ping");
     }
     // A turn closed or a match started: its followers read the state again.
-    if (notification.matchId) app.realtime.matchChanged(notification.matchId, notification.kind);
+    if (notification.matchId) app.matchChanged(notification.matchId, notification.kind);
   },
   onError: (error) => {
     app.log.error({ err: error }, "notification listener error");

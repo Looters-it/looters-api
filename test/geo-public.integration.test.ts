@@ -169,3 +169,27 @@ describe.skipIf(!url)("public geography", () => {
     }
   });
 });
+
+describe("tile cache under a rush", () => {
+  it("generates a tile once however many ask for it at the same moment", async () => {
+    const cache = new TileCache(1000);
+    let generated = 0;
+    const generate = async () => {
+      generated += 1;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return Buffer.from("tile");
+    };
+    const tiles = await Promise.all(Array.from({ length: 50 }, () => cache.load("k", generate)));
+    expect(generated).toBe(1);
+    expect(new Set(tiles.map((tile) => tile.toString()))).toEqual(new Set(["tile"]));
+    // Afterwards it comes from the cache.
+    await cache.load("k", generate);
+    expect(generated).toBe(1);
+  });
+
+  it("does not keep a failure: the next request tries again", async () => {
+    const cache = new TileCache(1000);
+    await expect(cache.load("k", () => Promise.reject(new Error("down")))).rejects.toThrow("down");
+    expect((await cache.load("k", () => Promise.resolve(Buffer.from("ok")))).toString()).toBe("ok");
+  });
+});

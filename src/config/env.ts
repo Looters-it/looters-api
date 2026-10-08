@@ -11,6 +11,9 @@ const serverEnvSchema = z.object({
   UPLOAD_DIR: z.string().default("./uploads"),
   UPLOAD_MAX_MB: z.coerce.number().int().positive().default(300),
   TILE_CACHE_MB: z.coerce.number().int().positive().default(128),
+  MATCH_STATE_CACHE_MS: z.coerce.number().int().min(0).max(60_000).default(1000),
+  MATCH_UPDATE_WINDOW_MS: z.coerce.number().int().min(0).max(60_000).default(1000),
+  DATABASE_POOL_SIZE: z.coerce.number().int().min(1).max(500).optional(),
   KAFKA_BROKERS: z
     .string()
     .transform((value) =>

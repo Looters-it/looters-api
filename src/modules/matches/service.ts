@@ -424,8 +424,13 @@ export class MatchService {
    * viewer's own territories: for everyone else the field is null, and free
    * territories are not listed at all, so hidden amounts never leave the server.
    */
-  async state(id: string, viewer: Viewer) {
-    const match = await this.visible(id, viewer);
+  /**
+   * Everything of a match that its state is made of, the same for every
+   * viewer: what each one may see of it is decided afterwards, in memory.
+   */
+  private async load(id: string) {
+    const match = await this.prisma.match.findUnique({ where: { id }, select: summarySelect });
+    if (!match) return null;
     const [empires, territories] = await Promise.all([
       this.prisma.empire.findMany({
         where: { matchId: id },
@@ -462,27 +467,10 @@ export class MatchService {
         },
       }),
     ]);
-    const mine = empires.find((empire) => empire.userId === viewer?.user.id) ?? null;
-    const currentTurn = Math.max(match.currentTurn, 1);
-    const rules = rulesOf(match);
-
-    // Open battles are public (a territory under attack is marked on the map for
-    // everyone). The battles just resolved are shown to their two sides only.
     const battles = await this.prisma.battle.findMany({
       where: {
         matchId: id,
-        OR: [
-          { status: "OPEN" },
-          ...(mine
-            ? [
-                {
-                  status: "RESOLVED" as const,
-                  turn: { gte: match.currentTurn - 1 },
-                  OR: [{ attackerEmpireId: mine.id }, { defenderEmpireId: mine.id }],
-                },
-              ]
-            : []),
-        ],
+        OR: [{ status: "OPEN" }, { status: "RESOLVED", turn: { gte: match.currentTurn - 1 } }],
       },
       orderBy: { createdAt: "desc" },
       include: { sources: { select: { territoryId: true, cost: true } } },
@@ -495,11 +483,6 @@ export class MatchService {
         })
       ).map((territory) => [territory.id, territory.name]),
     );
-    const unitsOf = (empireId: string) =>
-      territories
-        .filter((territory) => territory.ownerEmpireId === empireId)
-        .reduce((sum, territory) => sum + territory.units.length, 0);
-
     const structures = await this.prisma.structure.findMany({
       where: { matchId: id, active: true },
       orderBy: { builtTurn: "asc" },
@@ -518,6 +501,85 @@ export class MatchService {
       where: { empire: { matchId: id } },
       select: { empireId: true, allianceId: true, leavesAtTurn: true },
     });
+    const invites = await this.prisma.allianceInvite.findMany({
+      where: { matchId: id, status: "PENDING" },
+      orderBy: { createdAt: "desc" },
+      select: { id: true, fromEmpireId: true, toEmpireId: true },
+    });
+    // Municipalities controlled by each empire.
+    const unitsByEmpire = new Map<string, number>();
+    for (const territory of territories) {
+      const owner = territory.ownerEmpireId ?? "";
+      unitsByEmpire.set(owner, (unitsByEmpire.get(owner) ?? 0) + territory.units.length);
+    }
+    return {
+      match,
+      empires,
+      territories,
+      battles,
+      territoryNames,
+      structures,
+      members,
+      invites,
+      unitsByEmpire,
+    };
+  }
+
+  private readonly loaded = new Map<
+    string,
+    { at: number; data: ReturnType<MatchService["load"]> }
+  >();
+
+  /**
+   * What `load` read, kept for `stateCacheMs`. When a match changes all its
+   * followers read the state at the same moment: they share one reading
+   * instead of repeating it a hundred times. `forget` is called on every
+   * change this process knows of, so a player never reads a state older than
+   * their own action; the time limit covers anything else.
+   */
+  private loadShared(id: string) {
+    if (this.stateCacheMs <= 0) return this.load(id);
+    const now = Date.now();
+    const kept = this.loaded.get(id);
+    if (kept && now - kept.at < this.stateCacheMs) return kept.data;
+    if (this.loaded.size > 1000) this.loaded.clear();
+    const data = this.load(id);
+    this.loaded.set(id, { at: now, data });
+    // A failed reading is not kept.
+    data.catch(() => {
+      if (this.loaded.get(id)?.data === data) this.loaded.delete(id);
+    });
+    return data;
+  }
+
+  /** The match changed: its state is read again from the database. */
+  forget(id: string): void {
+    this.loaded.delete(id);
+  }
+
+  /** Reading shared between viewers for this long; 0 reads the database every time. */
+  stateCacheMs = 0;
+
+  async state(id: string, viewer: Viewer) {
+    const data = await this.loadShared(id);
+    if (!data || (data.match.status === "DRAFT" && data.match.ownerId !== viewer?.user.id)) {
+      throw notFound("Match");
+    }
+    const { match, empires, territories, territoryNames, structures, members } = data;
+    const mine = empires.find((empire) => empire.userId === viewer?.user.id) ?? null;
+    const currentTurn = Math.max(match.currentTurn, 1);
+    const rules = rulesOf(match);
+
+    // Open battles are public (a territory under attack is marked on the map for
+    // everyone). The battles just resolved are shown to their two sides only.
+    const battles = data.battles.filter(
+      (battle) =>
+        battle.status === "OPEN" ||
+        (mine !== null &&
+          (battle.attackerEmpireId === mine.id || battle.defenderEmpireId === mine.id)),
+    );
+    const unitsOf = (empireId: string) => data.unitsByEmpire.get(empireId) ?? 0;
+
     const myAlliance = mine ? members.find((member) => member.empireId === mine.id) : undefined;
     const allies = new Set(
       myAlliance
@@ -525,15 +587,9 @@ export class MatchService {
         : [],
     );
     const invites = mine
-      ? await this.prisma.allianceInvite.findMany({
-          where: {
-            matchId: id,
-            status: "PENDING",
-            OR: [{ toEmpireId: mine.id }, { fromEmpireId: mine.id }],
-          },
-          orderBy: { createdAt: "desc" },
-          select: { id: true, fromEmpireId: true, toEmpireId: true },
-        })
+      ? data.invites.filter(
+          (invite) => invite.toEmpireId === mine.id || invite.fromEmpireId === mine.id,
+        )
       : [];
 
     const targets = new Set(

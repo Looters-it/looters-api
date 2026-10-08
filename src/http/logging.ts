@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { FastifyInstance, FastifyServerOptions } from "fastify";
+import { LogController, type FastifyInstance, type FastifyServerOptions } from "fastify";
 import { z } from "zod";
 import { RateLimiter } from "../auth/rate-limit.js";
 
@@ -15,10 +15,11 @@ declare module "fastify" {
  * here and never taken from the client, and no automatic request lines, since
  * `registerRequestLogging` writes its own.
  */
-export const LOGGING_SERVER_OPTIONS = {
-  disableRequestLogging: true,
-  genReqId: () => randomUUID(),
-} satisfies Partial<FastifyServerOptions>;
+export const loggingServerOptions = () =>
+  ({
+    logController: new LogController({ disableRequestLogging: true }),
+    genReqId: () => randomUUID(),
+  }) satisfies Partial<FastifyServerOptions>;
 
 /** Never written to the logs, whatever ends up in a logged object. */
 export const REDACTED_PATHS = [

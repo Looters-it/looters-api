@@ -6,6 +6,8 @@
 export class TileCache {
   private readonly entries = new Map<string, Buffer>();
   private bytes = 0;
+  /** Tiles being generated right now, so that the same tile is never generated twice at once. */
+  private readonly generating = new Map<string, Promise<Buffer>>();
 
   constructor(private readonly maxBytes: number) {}
 
@@ -33,6 +35,28 @@ export class TileCache {
       this.entries.delete(oldest);
       this.bytes -= value.length;
     }
+  }
+
+  /**
+   * The tile, from the cache or generated now. When many players open the
+   * same map at the same moment they all ask for the same tiles: the first
+   * request generates each one and the others wait for it.
+   */
+  async load(key: string, generate: () => Promise<Buffer>): Promise<Buffer> {
+    const cached = this.get(key);
+    if (cached) return cached;
+    const running = this.generating.get(key);
+    if (running) return running;
+    const tile = generate()
+      .then((buffer) => {
+        this.set(key, buffer);
+        return buffer;
+      })
+      .finally(() => {
+        this.generating.delete(key);
+      });
+    this.generating.set(key, tile);
+    return tile;
   }
 
   get size(): number {

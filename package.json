@@ -19,7 +19,8 @@
     "test:watch": "vitest",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
-    "db:generate": "prisma generate"
+    "db:generate": "prisma generate",
+    "load": "tsx --env-file-if-exists=.env scripts/load-test.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.2",

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { CLOSE_SESSION_ENDED, RealtimeHub, type Connection } from "../src/realtime/hub.js";
 
 interface FakeConnection extends Connection {
@@ -90,5 +90,59 @@ describe("realtime hub", () => {
     expect(expired.closedWith).toBe(CLOSE_SESSION_ENDED);
     expect(valid.closedWith).toBeNull();
     expect(hub.onlineCount()).toBe(1);
+  });
+});
+
+describe("telling a match that it changed", () => {
+  function follower(hub: RealtimeHub, matchId: string) {
+    const received: { t: string; kinds?: string[] }[] = [];
+    const connection: Connection = {
+      userId: null,
+      sessionId: null,
+      expiresAt: null,
+      send: (data) => received.push(JSON.parse(data) as { t: string; kinds?: string[] }),
+      close: () => undefined,
+    };
+    hub.add(connection);
+    hub.subscribe(connection, matchId, false);
+    return () => received.filter((message) => message.t === "match.update");
+  }
+
+  it("tells every change at once when there is no window", () => {
+    const hub = new RealtimeHub();
+    const updates = follower(hub, "m1");
+    hub.matchChanged("m1", "annex");
+    hub.matchChanged("m1", "battle");
+    expect(updates().map((update) => update.kinds)).toEqual([["annex"], ["battle"]]);
+  });
+
+  it("tells the first change at once and the rest together when the window ends", () => {
+    vi.useFakeTimers();
+    try {
+      const hub = new RealtimeHub(1000);
+      const updates = follower(hub, "m1");
+      const other = follower(hub, "m2");
+
+      hub.matchChanged("m1", "annex");
+      expect(updates()).toHaveLength(1);
+      for (let i = 0; i < 50; i++) hub.matchChanged("m1", i % 2 ? "battle" : "allocate");
+      expect(updates()).toHaveLength(1);
+      // Another match is not held back by this one.
+      hub.matchChanged("m2", "annex");
+      expect(other()).toHaveLength(1);
+
+      vi.advanceTimersByTime(1000);
+      expect(updates()).toHaveLength(2);
+      expect(updates()[1]?.kinds?.sort()).toEqual(["allocate", "battle"]);
+
+      // Nothing else happened: nothing more is said, and the next change is told at once.
+      vi.advanceTimersByTime(5000);
+      expect(updates()).toHaveLength(2);
+      hub.matchChanged("m1", "turn");
+      expect(updates()).toHaveLength(3);
+      hub.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

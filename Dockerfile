@@ -1,6 +1,9 @@
-FROM node:22-alpine AS base
-# Prisma's query engine needs OpenSSL.
-RUN apk add --no-cache openssl && corepack enable
+# Debian, not Alpine: Prisma's query engine is several times slower on musl when many
+# requests run at once (measured with the load test, see docs/LOAD.md).
+FROM node:22-bookworm-slim AS base
+# Prisma's query engine needs OpenSSL; wget is for the container health check.
+RUN apt-get update && apt-get install -y --no-install-recommends openssl wget ca-certificates \
+  && rm -rf /var/lib/apt/lists/* && corepack enable
 WORKDIR /app
 
 FROM base AS build

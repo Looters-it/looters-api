@@ -123,13 +123,23 @@ export function registerMatchRoutes(app: FastifyInstance, deps: MatchRoutesDeps)
   });
 
   /** Every municipality of the match with a point inside it. */
-  app.get("/api/matches/:id/units", async (request) => {
+  app.get("/api/matches/:id/units", async (request, reply) => {
     const { id } = matchParams.parse(request.params);
     await matches.get(id, await guard.optional(request));
-    return prisma.$queryRaw<{ id: number; name: string; lon: number; lat: number }[]>`
-      SELECT u.id, u.name, round(u."centroidLon"::numeric, 5)::float8 AS lon,
-        round(u."centroidLat"::numeric, 5)::float8 AS lat
-      FROM "GeoUnit" u WHERE ${inMatch(id)} ORDER BY u.id`;
+    // The same few thousand rows for every player of the match: read and serialised
+    // once, kept with the tiles and under the same version (the number of municipalities).
+    const version = String(await unitCount(id));
+    const body = await tileCache.load(`match-units:${id}:${version}`, async () =>
+      Buffer.from(
+        JSON.stringify(
+          await prisma.$queryRaw<{ id: number; name: string; lon: number; lat: number }[]>`
+            SELECT u.id, u.name, round(u."centroidLon"::numeric, 5)::float8 AS lon,
+              round(u."centroidLat"::numeric, 5)::float8 AS lat
+            FROM "GeoUnit" u WHERE ${inMatch(id)} ORDER BY u.id`,
+        ),
+      ),
+    );
+    return reply.header("content-type", "application/json; charset=utf-8").send(body);
   });
 
   app.get("/api/matches/:id/tiles/:z/:x/:y.mvt", async (request, reply) => {
@@ -144,11 +154,9 @@ export function registerMatchRoutes(app: FastifyInstance, deps: MatchRoutesDeps)
     // Geometry is public; a match with no territories is a draft or does not exist.
     if (count === 0) throw notFound("Match");
     const version = String(count);
-    let tile = tileCache.get(key(version));
-    if (!tile) {
-      tile = await generateTile(prisma, inMatch(id), { zoom, x, y });
-      tileCache.set(key(version), tile);
-    }
+    const tile = await tileCache.load(key(version), () =>
+      generateTile(prisma, inMatch(id), { zoom, x, y }),
+    );
     return sendTile(reply, tile, requested === version);
   });
 }

@@ -33,6 +33,23 @@ export interface Connection {
 export class RealtimeHub {
   private readonly connections = new Set<Connection>();
   private lastOnline = 0;
+  /** Matches whose followers were told of a change within the window, and what came after. */
+  private readonly quiet = new Map<string, { timer: NodeJS.Timeout; kinds: Set<string> }>();
+
+  /**
+   * `updateWindowMs`: at most one `match.update` per match in this time. Every
+   * follower answers one by reading the state again, so a hundred players
+   * acting at once would otherwise make each of them read it a hundred times.
+   * The first change is told at once; those that follow within the window are
+   * told together when it ends. Zero tells every change as it happens.
+   */
+  constructor(private readonly updateWindowMs = 0) {}
+
+  /** Drops what is waiting to be told: for when the server stops. */
+  stop(): void {
+    for (const { timer } of this.quiet.values()) clearTimeout(timer);
+    this.quiet.clear();
+  }
 
   /** Registers a socket, tells it the current count, and returns its removal function. */
   add(connection: Connection): () => void {
@@ -111,7 +128,29 @@ export class RealtimeHub {
 
   /** Tells the followers of a match that it changed. `kinds` hints at what. */
   matchChanged(matchId: string, ...kinds: string[]): void {
+    if (this.updateWindowMs <= 0) {
+      this.publish(matchId, { t: "match.update", matchId, kinds });
+      return;
+    }
+    const waiting = this.quiet.get(matchId);
+    if (waiting) {
+      for (const kind of kinds) waiting.kinds.add(kind);
+      return;
+    }
     this.publish(matchId, { t: "match.update", matchId, kinds });
+    this.openWindow(matchId);
+  }
+
+  private openWindow(matchId: string): void {
+    const timer = setTimeout(() => {
+      const kinds = [...(this.quiet.get(matchId)?.kinds ?? [])];
+      this.quiet.delete(matchId);
+      if (kinds.length === 0) return;
+      this.publish(matchId, { t: "match.update", matchId, kinds });
+      this.openWindow(matchId);
+    }, this.updateWindowMs);
+    timer.unref();
+    this.quiet.set(matchId, { timer, kinds: new Set() });
   }
 
   private readonly lastMatchOnline = new Map<string, number>();

@@ -5,7 +5,7 @@ import { createAuthGuard } from "./auth/guard.js";
 import { RateLimiter, type RateLimitRule } from "./auth/rate-limit.js";
 import { SessionService } from "./auth/sessions.js";
 import { registerErrorHandling } from "./http/errors.js";
-import { LOGGING_SERVER_OPTIONS, registerRequestLogging } from "./http/logging.js";
+import { loggingServerOptions, registerRequestLogging } from "./http/logging.js";
 import { registerAdminRoutes } from "./modules/admin/routes.js";
 import { registerAuthRoutes } from "./modules/auth/routes.js";
 import { registerGeoAdminRoutes } from "./modules/geo/admin-routes.js";
@@ -28,6 +28,8 @@ import { registerWebSocket } from "./realtime/ws.js";
 declare module "fastify" {
   interface FastifyInstance {
     realtime: RealtimeHub;
+    /** For changes made outside this process (by `jobs`): same effect as one made here. */
+    matchChanged: (matchId: string, kind: string) => void;
   }
 }
 
@@ -57,6 +59,10 @@ export interface AppDeps {
   battleQueue?: ResolutionQueue;
   /** Memory given to generated map tiles. */
   tileCacheMegabytes?: number;
+  /** At most one "the match changed" push per match in this time; 0 pushes every change. */
+  matchUpdateWindowMs?: number;
+  /** The state of a match read once for all its viewers within this time; 0 disables it. */
+  matchStateCacheMs?: number;
   logger?: FastifyServerOptions["logger"];
   /** True behind the web proxy, so that the client address is read from X-Forwarded-For. */
   trustProxy?: boolean;
@@ -68,14 +74,17 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const app = Fastify({
     logger: deps.logger ?? false,
     trustProxy: deps.trustProxy ?? false,
-    ...LOGGING_SERVER_OPTIONS,
+    ...loggingServerOptions(),
   });
 
   registerErrorHandling(app);
   registerRequestLogging(app);
   await app.register(cookie);
 
-  const hub = new RealtimeHub();
+  const hub = new RealtimeHub(deps.matchUpdateWindowMs ?? 0);
+  app.addHook("onClose", () => {
+    hub.stop();
+  });
   const sessions = new SessionService(deps.prisma, auth.sessionTtlHours * 3_600_000);
   sessions.onRevoked = (sessionId) => {
     hub.closeSession(sessionId);
@@ -104,9 +113,14 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const tileCache = new TileCache((deps.tileCacheMegabytes ?? 64) * 1_048_576);
   registerGeoPublicRoutes(app, { prisma: deps.prisma, tileCache });
   const matches = new MatchService(deps.prisma);
-  matches.onChange = (matchId, kind) => {
+  matches.stateCacheMs = deps.matchStateCacheMs ?? 0;
+  // Whatever changes a match: its state is read anew and its followers are told.
+  const matchChanged = (matchId: string, kind: string) => {
+    matches.forget(matchId);
     hub.matchChanged(matchId, kind);
   };
+  matches.onChange = matchChanged;
+  app.decorate("matchChanged", matchChanged);
   matches.matchOnline = (matchId) => hub.matchOnline(matchId);
   const game = new GameService(deps.prisma, matches);
   game.onChange = matches.onChange;

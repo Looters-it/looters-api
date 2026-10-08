@@ -236,6 +236,63 @@ describe.skipIf(!url)("board", () => {
     expect(Object.values(BOARD_KINDS).flat()).toContain("BATTLE_RESOLVED");
   });
 
+  describe("state shared between viewers", () => {
+    interface Seen {
+      match: { currentTurn: number };
+      territories: { id: string; ownerEmpireId: string; resources: number | null }[];
+    }
+    it("is read once for everybody, and again as soon as the match changes", async () => {
+      const cached = await buildApp({
+        prisma,
+        matchStateCacheMs: 60_000,
+        health: {
+          pingDatabase: () => Promise.resolve(),
+          lastJobsPongAt: () => null,
+          battleQueueConnected: () => true,
+        },
+      });
+      const state = async (user: string | null) =>
+        (
+          await cached.inject({
+            url: `/api/matches/${matchId}/state`,
+            headers: user ? { cookie: cookies[user] ?? "" } : {},
+          })
+        ).json<Seen>();
+      try {
+        const payFrom = await territoryId(0);
+        // Each viewer still gets their own view of the shared reading.
+        const [anna, bruno, guest] = [await state("anna"), await state("bruno"), await state(null)];
+        const resourcesOf = (seen: Seen) =>
+          seen.territories.find((t) => t.id === payFrom)?.resources;
+        const stored = await prisma.territory.findUniqueOrThrow({ where: { id: payFrom } });
+        expect(resourcesOf(anna)).toBe(stored.resources);
+        expect(resourcesOf(bruno)).toBeNull();
+        expect(resourcesOf(guest)).toBeNull();
+
+        // A change made behind the api's back is not seen until the api is told…
+        await prisma.match.update({ where: { id: matchId }, data: { currentTurn: 7 } });
+        expect((await state("anna")).match.currentTurn).toBe(1);
+        // …which is what a notification from jobs does.
+        cached.matchChanged(matchId, "turn");
+        expect((await state("anna")).match.currentTurn).toBe(7);
+
+        // An action through the api is seen at once, by its author and by everybody else.
+        const annexed = await cached.inject({
+          method: "POST",
+          url: `/api/matches/${matchId}/annex`,
+          payload: { geoUnitId: unit[1], payFromTerritoryId: payFrom, turn: 7 },
+          headers: { cookie: cookies.anna ?? "" },
+        });
+        expect(annexed.statusCode).toBe(200);
+        expect(annexed.json<Seen>().territories).toHaveLength(3);
+        expect((await state("bruno")).territories).toHaveLength(3);
+        expect((await state(null)).territories).toHaveLength(3);
+      } finally {
+        await cached.close();
+      }
+    });
+  });
+
   describe("history of the turns", () => {
     interface Turn {
       turn: number;

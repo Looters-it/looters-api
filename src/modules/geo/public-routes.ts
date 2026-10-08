@@ -162,11 +162,9 @@ export function registerGeoPublicRoutes(app: FastifyInstance, deps: GeoPublicDep
     if (version === null) throw notFound("Folder");
 
     const key = `${id}:${version}:${coordinates}`;
-    let tile = cache.get(key);
-    if (!tile) {
-      tile = await generateTile(prisma, Prisma.sql`u."areaId" IN (${subtree(id)})`, { zoom, x, y });
-      cache.set(key, tile);
-    }
+    const tile = await cache.load(key, () =>
+      generateTile(prisma, Prisma.sql`u."areaId" IN (${subtree(id)})`, { zoom, x, y }),
+    );
 
     // Immutable only when the URL names the version that was served.
     return send(tile, requested === version);
