@@ -9,7 +9,9 @@ import { registerAdminRoutes } from "./modules/admin/routes.js";
 import { registerAuthRoutes } from "./modules/auth/routes.js";
 import { registerGeoAdminRoutes } from "./modules/geo/admin-routes.js";
 import { registerGeoPublicRoutes } from "./modules/geo/public-routes.js";
+import { TileCache } from "./modules/geo/tile-cache.js";
 import { registerHealthRoutes, type HealthDeps } from "./modules/health/routes.js";
+import { registerMatchRoutes } from "./modules/matches/routes.js";
 import { registerStatsRoutes } from "./modules/stats/routes.js";
 import { RealtimeHub } from "./realtime/hub.js";
 import { registerWebSocket } from "./realtime/ws.js";
@@ -76,10 +78,10 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     uploadDir: deps.uploads?.dir ?? "./uploads",
     maxUploadBytes: (deps.uploads?.maxMegabytes ?? 300) * 1_048_576,
   });
-  registerGeoPublicRoutes(app, {
-    prisma: deps.prisma,
-    tileCacheBytes: (deps.tileCacheMegabytes ?? 64) * 1_048_576,
-  });
+  // One cache for every kind of tile: keys carry what they belong to.
+  const tileCache = new TileCache((deps.tileCacheMegabytes ?? 64) * 1_048_576);
+  registerGeoPublicRoutes(app, { prisma: deps.prisma, tileCache });
+  registerMatchRoutes(app, { prisma: deps.prisma, guard, tileCache });
   registerStatsRoutes(app, hub);
   await registerWebSocket(app, hub, guard);
 

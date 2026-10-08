@@ -2,36 +2,29 @@ import { Prisma, type PrismaClient } from "@prisma/client";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { notFound } from "../../http/errors.js";
-import { TileCache } from "./tile-cache.js";
+import type { TileCache } from "./tile-cache.js";
+import {
+  generateTile,
+  insideGrid,
+  LABEL_MIN_ZOOM,
+  sendTile,
+  tileCoordinates,
+  TILE_MAX_ZOOM,
+  TILE_MIN_ZOOM,
+} from "./tiles.js";
 
 export interface GeoPublicDeps {
   prisma: PrismaClient;
-  tileCacheBytes: number;
+  tileCache: TileCache;
 }
 
-/** Zoom range of the tiles; the map overzooms beyond the last level. */
-export const TILE_MIN_ZOOM = 4;
-export const TILE_MAX_ZOOM = 12;
-/** From this zoom the full geometry is used instead of the simplified one. */
-const FULL_DETAIL_ZOOM = 11;
-/** Below this zoom borders are simplified to about one screen pixel before being encoded. */
-const PIXEL_SIMPLIFY_BELOW_ZOOM = 9;
-/** Width of the world in Web Mercator metres. */
-const WORLD_METRES = 40_075_016.68;
 /** How long a computed data version is trusted before it is read again. */
 const VERSION_TTL_MS = 2000;
-/** Municipality names are in the tiles from this zoom on. */
-const LABEL_MIN_ZOOM = 9;
 
 const areaParams = z.object({ id: z.string().min(1) });
-const tileParams = z
-  .object({
-    id: z.string().min(1),
-    z: z.coerce.number().int().min(TILE_MIN_ZOOM).max(TILE_MAX_ZOOM),
-    x: z.coerce.number().int().min(0),
-    y: z.coerce.number().int().min(0),
-  })
-  .refine((tile) => tile.x < 2 ** tile.z && tile.y < 2 ** tile.z, "Tile outside the grid");
+const tileParams = tileCoordinates
+  .extend({ id: z.string().min(1) })
+  .refine(insideGrid, "Tile outside the grid");
 
 /** Ids of a folder and of everything below it. */
 const subtree = (id: string) => Prisma.sql`
@@ -49,7 +42,7 @@ const subtree = (id: string) => Prisma.sql`
  */
 export function registerGeoPublicRoutes(app: FastifyInstance, deps: GeoPublicDeps): void {
   const { prisma } = deps;
-  const cache = new TileCache(deps.tileCacheBytes);
+  const cache = deps.tileCache;
 
   /**
    * Changes whenever the municipalities under a folder change. It is part of
@@ -90,6 +83,24 @@ export function registerGeoPublicRoutes(app: FastifyInstance, deps: GeoPublicDep
       JOIN "GeoUnit" u ON u."areaId" = tree.id
       GROUP BY root.id, root.name
       ORDER BY count(u.id) DESC, root.name`;
+    return rows;
+  });
+
+  /** The whole folder tree with the municipalities under each node, to choose where a match is played. */
+  app.get("/api/geo/tree", async () => {
+    const rows = await prisma.$queryRaw<
+      { id: string; name: string; parentId: string | null; unitCount: number }[]
+    >`
+      WITH RECURSIVE tree AS (
+        SELECT id AS top, id FROM "GeoArea"
+        UNION ALL
+        SELECT tree.top, child.id FROM "GeoArea" child JOIN tree ON child."parentId" = tree.id
+      )
+      SELECT a.id, a.name, a."parentId", count(u.id)::int AS "unitCount"
+      FROM "GeoArea" a JOIN tree ON tree.top = a.id
+      LEFT JOIN "GeoUnit" u ON u."areaId" = tree.id
+      GROUP BY a.id, a.name, a."parentId"
+      ORDER BY a.name`;
     return rows;
   });
 
@@ -139,11 +150,7 @@ export function registerGeoPublicRoutes(app: FastifyInstance, deps: GeoPublicDep
   app.get("/api/geo/areas/:id/tiles/:z/:x/:y.mvt", async (request, reply) => {
     const { id, z: zoom, x, y } = tileParams.parse(request.params);
     const requested = (request.query as { v?: string }).v;
-    const send = (body: Buffer, immutable: boolean) =>
-      reply
-        .header("content-type", "application/vnd.mapbox-vector-tile")
-        .header("cache-control", immutable ? "public, max-age=31536000, immutable" : "no-cache")
-        .send(body);
+    const send = (body: Buffer, immutable: boolean) => sendTile(reply, body, immutable);
 
     // A tile cached under the version the client names was generated from
     // exactly that data: it is served without touching the database.
@@ -157,37 +164,7 @@ export function registerGeoPublicRoutes(app: FastifyInstance, deps: GeoPublicDep
     const key = `${id}:${version}:${coordinates}`;
     let tile = cache.get(key);
     if (!tile) {
-      // One pixel of a 512-pixel tile, in metres: finer detail cannot be seen.
-      const pixel = WORLD_METRES / (2 ** zoom * 512);
-      const projected =
-        zoom < PIXEL_SIMPLIFY_BELOW_ZOOM
-          ? Prisma.sql`ST_Simplify(ST_Transform(found.geom, 3857), ${pixel}::float8, true)`
-          : Prisma.sql`ST_Transform(found.geom, 3857)`;
-      const geometry = zoom >= FULL_DETAIL_ZOOM ? Prisma.sql`u.geom` : Prisma.sql`u."geomSimple"`;
-      const rows = await prisma.$queryRaw<{ tile: Buffer }[]>`
-        WITH tile AS (
-          SELECT ST_TileEnvelope(${zoom}::int, ${x}::int, ${y}::int) AS envelope,
-            -- Slightly larger than the tile, so borders cut by its edge are not lost.
-            ST_Transform(ST_TileEnvelope(${zoom}::int, ${x}::int, ${y}::int, margin => 0.02), 4326) AS reach
-        ), found AS (
-          SELECT u.id, u.name, u."centroidLon" AS lon, u."centroidLat" AS lat, u."areaKm2",
-            ${geometry} AS geom
-          FROM "GeoUnit" u, tile
-          WHERE u."areaId" IN (${subtree(id)}) AND u.geom && tile.reach
-        ), units AS (
-          SELECT found.id, found.name,
-            ST_AsMVTGeom(${projected}, tile.envelope, 4096, 64, true) AS shape
-          FROM found, tile
-        ), labels AS (
-          SELECT found.id, found.name, round(found."areaKm2")::int AS area,
-            ST_AsMVTGeom(ST_Transform(ST_SetSRID(ST_MakePoint(found.lon, found.lat), 4326), 3857),
-              tile.envelope, 4096, 0, true) AS point
-          FROM found, tile WHERE ${zoom >= LABEL_MIN_ZOOM}::boolean
-        )
-        SELECT (SELECT coalesce(ST_AsMVT(units, 'units', 4096, 'shape', 'id'), ''::bytea) FROM units WHERE shape IS NOT NULL)
-            || (SELECT coalesce(ST_AsMVT(labels, 'labels', 4096, 'point', 'id'), ''::bytea) FROM labels WHERE point IS NOT NULL)
-          AS tile`;
-      tile = Buffer.from(rows[0]?.tile ?? []);
+      tile = await generateTile(prisma, Prisma.sql`u."areaId" IN (${subtree(id)})`, { zoom, x, y });
       cache.set(key, tile);
     }
 
