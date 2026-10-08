@@ -22,6 +22,8 @@ import { StructureService } from "./modules/game/structures.js";
 import { registerMatchRoutes } from "./modules/matches/routes.js";
 import { MatchService } from "./modules/matches/service.js";
 import { registerStatsRoutes } from "./modules/stats/routes.js";
+import { BotRunner } from "./modules/bots/runner.js";
+import { BotService } from "./modules/bots/service.js";
 import { RealtimeHub } from "./realtime/hub.js";
 import { registerWebSocket } from "./realtime/ws.js";
 
@@ -30,6 +32,8 @@ declare module "fastify" {
     realtime: RealtimeHub;
     /** For changes made outside this process (by `jobs`): same effect as one made here. */
     matchChanged: (matchId: string, kind: string) => void;
+    bots: BotService;
+    wakeBots: () => Promise<void>;
   }
 }
 
@@ -63,6 +67,8 @@ export interface AppDeps {
   matchUpdateWindowMs?: number;
   /** The state of a match read once for all its viewers within this time; 0 disables it. */
   matchStateCacheMs?: number;
+  /** Lets bots act by themselves when turns begin and attacks arrive. */
+  runBots?: boolean;
   logger?: FastifyServerOptions["logger"];
   /** True behind the web proxy, so that the client address is read from X-Forwarded-For. */
   trustProxy?: boolean;
@@ -115,9 +121,11 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const matches = new MatchService(deps.prisma);
   matches.stateCacheMs = deps.matchStateCacheMs ?? 0;
   // Whatever changes a match: its state is read anew and its followers are told.
+  let botRunner: BotRunner | null = null;
   const matchChanged = (matchId: string, kind: string) => {
     matches.forget(matchId);
     hub.matchChanged(matchId, kind);
+    botRunner?.matchChanged(matchId, kind);
   };
   matches.onChange = matchChanged;
   app.decorate("matchChanged", matchChanged);
@@ -143,6 +151,29 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const alliances = new AllianceService(deps.prisma, matches);
   alliances.onChange = matches.onChange;
   registerGameRoutes(app, game, battles, structures, alliances, guard);
+
+  // Empires played by the server. They act only where the runner is on (not in tests,
+  // which call the service themselves).
+  const bots = new BotService(deps.prisma, matches, game, battles, structures, alliances);
+  bots.onError = (error, context) => {
+    app.log.error({ event: "bot_error", err: error, ...context }, "a bot failed");
+  };
+  app.decorate("bots", bots);
+  if (deps.runBots) {
+    botRunner = new BotRunner(bots);
+    const runner = botRunner;
+    app.addHook("onClose", () => {
+      runner.stop();
+    });
+  }
+  /** After a restart: the bots of the matches in progress play the turn they may have missed. */
+  app.decorate("wakeBots", async () => {
+    const running = await deps.prisma.match.findMany({
+      where: { status: "RUNNING", config: { path: ["botsEnabled"], equals: true } },
+      select: { id: true },
+    });
+    for (const match of running) botRunner?.matchChanged(match.id, "match.started");
+  });
   const board = new BoardService(deps.prisma, matches);
   board.onChange = matches.onChange;
   registerBoardRoutes(app, board, guard);

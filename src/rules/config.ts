@@ -11,8 +11,16 @@ const count = z.number().int().min(0);
  */
 const matchRulesBase = z.strictObject({
   // Match start (provisional, see docs/SPEC.md)
-  minPlayersToStart: z.number().int().min(1).default(2),
+  // One is enough: the other empires can be bots, or the player can be alone.
+  minPlayersToStart: z.number().int().min(1).default(1),
   lateJoin: z.boolean().default(true),
+
+  // Bots: empires played by the server, founded on free municipalities as turns go by.
+  botsEnabled: z.boolean().default(false),
+  // How many bots a match may have in all, counting those that fell.
+  botsMax: z.number().int().min(0).max(100).default(5),
+  // Chance that a new bot appears when a turn begins.
+  botSpawnChancePct: pct.default(30),
 
   // Resources (PROMPT §2.3, §2.4)
   startResources: count.default(200),

@@ -25,6 +25,7 @@ const app = await buildApp({
   trustProxy: env.TRUST_PROXY,
   matchUpdateWindowMs: env.MATCH_UPDATE_WINDOW_MS,
   matchStateCacheMs: env.MATCH_STATE_CACHE_MS,
+  runBots: true,
   uploads: { dir: env.UPLOAD_DIR, maxMegabytes: env.UPLOAD_MAX_MB },
   tileCacheMegabytes: env.TILE_CACHE_MB,
   battleQueue,
@@ -84,6 +85,8 @@ for (const event of ["uncaughtException", "unhandledRejection"] as const) {
 }
 
 await app.listen({ port: env.PORT, host: env.HOST });
+
+await app.wakeBots();
 
 // Round trip through the queue: proves at startup that `jobs` consumes it.
 await enqueueJob(prisma, "system.ping", { sentAt: new Date().toISOString() });

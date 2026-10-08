@@ -405,7 +405,13 @@ export class MatchService {
    * Enrols the viewer: the chosen municipality becomes the capital of a new
    * empire. Whoever arrives first gets it (PROMPT §9 #5).
    */
-  async join(id: string, body: z.infer<typeof joinBody>, viewer: AuthContext) {
+  async join(
+    id: string,
+    body: z.infer<typeof joinBody>,
+    viewer: AuthContext,
+    /** A bot enters a running match whatever the rules for players say, and needs no code. */
+    options: { asBot?: boolean } = {},
+  ) {
     await this.visible(id, viewer);
     await this.prisma.$transaction(async (tx) => {
       // Joins of one match run one at a time: seats, names and colours are checked safely.
@@ -414,10 +420,11 @@ export class MatchService {
       if (!match) throw notFound("Match");
       const rules = rulesOf(match);
 
-      if (match.status !== "OPEN" && !(match.status === "RUNNING" && rules.lateJoin)) {
-        throw conflict("REGISTRATION_CLOSED", "This match does not accept players");
-      }
-      if (match.inviteCode !== null && body.inviteCode !== match.inviteCode) {
+      const open =
+        match.status === "OPEN" ||
+        (match.status === "RUNNING" && (rules.lateJoin || options.asBot === true));
+      if (!open) throw conflict("REGISTRATION_CLOSED", "This match does not accept players");
+      if (!options.asBot && match.inviteCode !== null && body.inviteCode !== match.inviteCode) {
         throw new AppError(403, "INVITE_CODE_REQUIRED", "Wrong or missing invite code");
       }
       if (await tx.empire.findFirst({ where: { matchId: id, userId: viewer.user.id } })) {
@@ -560,7 +567,7 @@ export class MatchService {
           allocationMode: true,
           lastCapitalMoveTurn: true,
           fallenTurn: true,
-          user: { select: { username: true } },
+          user: { select: { username: true, isBot: true } },
           logo: { select: { updatedAt: true } },
         },
       }),
@@ -755,6 +762,8 @@ export class MatchService {
         }) => ({
           ...empire,
           username: user.username,
+          /** Played by the server. */
+          isBot: user.isBot,
           /** Where the uploaded logo is, if there is one; it changes when the image does. */
           logoUrl: logo
             ? `/api/matches/${id}/empires/${empire.id}/logo?v=${String(logo.updatedAt.getTime())}`

@@ -85,6 +85,8 @@ model User {
   email        String
   passwordHash String
   role         Role      @default(USER)
+  // An empire played by the server: nobody can log in as this user.
+  isBot        Boolean   @default(false)
   createdAt    DateTime  @default(now())
   sessions     Session[]
   empires      Empire[]

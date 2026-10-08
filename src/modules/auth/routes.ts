@@ -87,8 +87,9 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthRoutesDeps): 
     const wait = Math.max(...keys.map((key) => limits.login.retryAfterSeconds(key)));
     if (wait > 0) throw tooManyAttempts(wait);
 
+    // A bot is a user nobody can be: it is looked for like someone who does not exist.
     const user = await prisma.user.findFirst({
-      where: { username: { equals: body.username, mode: "insensitive" } },
+      where: { username: { equals: body.username, mode: "insensitive" }, isBot: false },
     });
     const valid = await verifyPassword(user?.passwordHash ?? DUMMY_HASH, body.password);
     if (!user || !valid) {
