@@ -24,6 +24,12 @@ export type GameEventInput =
       territoryId: string;
       data: { empireName: string; territoryName: string };
     }
+  | {
+      type: "CAPITAL_BUILT" | "AREA_CREATED" | "AREA_RENAMED";
+      empireId: string;
+      territoryId: string;
+      data: { empireName: string; territoryName: string };
+    }
   | { type: "MATCH_OPENED" };
 
 export async function recordEvent(

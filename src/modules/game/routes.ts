@@ -1,6 +1,14 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { AuthGuard } from "../../auth/guard.js";
+import {
+  buildBody,
+  mergeBody,
+  mergePreviewBody,
+  moveStructureBody,
+  renameBody,
+  type StructureService,
+} from "./structures.js";
 import { attackBody, attackPreviewBody, respondBody, type BattleService } from "./battles.js";
 import {
   allocateBody,
@@ -15,10 +23,14 @@ const unitParams = matchParams.extend({ geoUnitId: z.coerce.number().int().posit
 
 const battleParams = matchParams.extend({ battleId: z.string().min(1) });
 
+const structureParams = matchParams.extend({ structureId: z.string().min(1) });
+const territoryParams = matchParams.extend({ territoryId: z.string().min(1) });
+
 export function registerGameRoutes(
   app: FastifyInstance,
   game: GameService,
   battles: BattleService,
+  structures: StructureService,
   guard: AuthGuard,
 ): void {
   app.get("/api/matches/:id/units/:geoUnitId", async (request) => {
@@ -66,5 +78,41 @@ export function registerGameRoutes(
     const auth = await guard.user(request);
     const { id, battleId } = battleParams.parse(request.params);
     return battles.respond(id, battleId, respondBody.parse(request.body), auth);
+  });
+
+  // ---------- Structures and merged areas ----------
+
+  app.get("/api/matches/:id/structures/catalogue", async (request) => {
+    const auth = await guard.user(request);
+    return structures.catalogue(matchParams.parse(request.params).id, auth);
+  });
+  app.post("/api/matches/:id/structures", async (request, reply) => {
+    const auth = await guard.user(request);
+    const { id } = matchParams.parse(request.params);
+    return reply.code(201).send(await structures.build(id, buildBody.parse(request.body), auth));
+  });
+  app.post("/api/matches/:id/structures/:structureId/move", async (request) => {
+    const auth = await guard.user(request);
+    const { id, structureId } = structureParams.parse(request.params);
+    return structures.move(id, structureId, moveStructureBody.parse(request.body), auth);
+  });
+
+  app.get("/api/matches/:id/areas", async (request) =>
+    structures.areas(matchParams.parse(request.params).id, await guard.optional(request)),
+  );
+  app.post("/api/matches/:id/merge/preview", async (request) => {
+    const auth = await guard.user(request);
+    const { id } = matchParams.parse(request.params);
+    return structures.previewMerge(id, mergePreviewBody.parse(request.body), auth);
+  });
+  app.post("/api/matches/:id/merge", async (request, reply) => {
+    const auth = await guard.user(request);
+    const { id } = matchParams.parse(request.params);
+    return reply.code(201).send(await structures.merge(id, mergeBody.parse(request.body), auth));
+  });
+  app.patch("/api/matches/:id/territories/:territoryId", async (request) => {
+    const auth = await guard.user(request);
+    const { id, territoryId } = territoryParams.parse(request.params);
+    return structures.rename(id, territoryId, renameBody.parse(request.body), auth);
   });
 }

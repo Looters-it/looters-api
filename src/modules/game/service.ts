@@ -134,20 +134,35 @@ export class GameService {
         },
       });
       const isProtected = (territory.protectedUntilTurn ?? 0) >= Math.max(match.currentTurn, 1);
+      const blocking = await this.prisma.structure.findMany({
+        where: { matchId, active: true, territoryId: { in: [territory.id, ...ids] } },
+        select: { territoryId: true, data: true },
+      });
+      const has = (territoryId: string, effect: string) =>
+        blocking.some(
+          (structure) =>
+            structure.territoryId === territoryId &&
+            ((structure.data as { effects?: string[] }).effects ?? []).includes(effect),
+        );
       attack = {
         /** Why the territory cannot be attacked now, if so. */
         blocked: isProtected
           ? ("PROTECTED" as const)
-          : territory.battleLock
-            ? ("IN_BATTLE" as const)
-            : sources.length === 0
-              ? ("NOT_ADJACENT" as const)
-              : null,
+          : has(territory.id, "NO_ATTACK_ON")
+            ? ("BLOCKED" as const)
+            : territory.battleLock
+              ? ("IN_BATTLE" as const)
+              : sources.length === 0
+                ? ("NOT_ADJACENT" as const)
+                : null,
         from: sources.map((source) => ({
           territoryId: source.id,
           name: source.name,
           resources: source.resources,
-          usable: source.battleLock === null && source.resources >= 1,
+          usable:
+            source.battleLock === null &&
+            source.resources >= 1 &&
+            !has(source.id, "NO_ATTACK_FROM"),
         })),
       };
     }

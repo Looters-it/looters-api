@@ -500,6 +500,19 @@ export class MatchService {
         .filter((territory) => territory.ownerEmpireId === empireId)
         .reduce((sum, territory) => sum + territory.units.length, 0);
 
+    const structures = await this.prisma.structure.findMany({
+      where: { matchId: id, active: true },
+      orderBy: { builtTurn: "asc" },
+      select: {
+        id: true,
+        type: true,
+        territoryId: true,
+        empireId: true,
+        expiresTurn: true,
+        data: true,
+      },
+    });
+
     const targets = new Set(
       battles.filter((battle) => battle.status === "OPEN").map((b) => b.targetTerritoryId),
     );
@@ -609,6 +622,19 @@ export class MatchService {
             : {}),
         };
       }),
+      // Structures are public: a block and a second capital are marked on the map for everyone.
+      structures: structures.map((structure) => ({
+        id: structure.id,
+        type: structure.type,
+        territoryId: structure.territoryId,
+        empireId: structure.empireId,
+        effects: (structure.data as { effects?: string[] }).effects ?? [],
+        /** Turns it still lasts, counting the current one; null if permanent. */
+        turnsLeft:
+          structure.expiresTurn === null
+            ? null
+            : Math.max(0, structure.expiresTurn - match.currentTurn + 1),
+      })),
       online: {
         connected: this.matchOnline(id),
         total: empires.filter((empire) => empire.status === "ACTIVE").length,

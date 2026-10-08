@@ -14,6 +14,7 @@ import { registerHealthRoutes, type HealthDeps } from "./modules/health/routes.j
 import { BattleService, type ResolutionQueue } from "./modules/game/battles.js";
 import { registerGameRoutes } from "./modules/game/routes.js";
 import { GameService } from "./modules/game/service.js";
+import { StructureService } from "./modules/game/structures.js";
 import { registerMatchRoutes } from "./modules/matches/routes.js";
 import { MatchService } from "./modules/matches/service.js";
 import { registerStatsRoutes } from "./modules/stats/routes.js";
@@ -114,7 +115,9 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     // Not fatal: the battle is resolved, with the recorded answer, when the turn closes.
     app.log.error({ err: error, battleId }, "battle not handed to jobs");
   };
-  registerGameRoutes(app, game, battles, guard);
+  const structures = new StructureService(deps.prisma, matches);
+  structures.onChange = matches.onChange;
+  registerGameRoutes(app, game, battles, structures, guard);
   registerStatsRoutes(app, hub);
   await registerWebSocket(app, hub, guard, async (matchId, userId) => {
     const empires = await deps.prisma.empire.count({

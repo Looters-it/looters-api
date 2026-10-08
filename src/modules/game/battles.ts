@@ -85,6 +85,20 @@ export class BattleService {
         "A territory just acquired is protected until the turn ends",
       );
     }
+    // Active structures decide through their effects, never through their type.
+    const structures = await tx.structure.findMany({
+      where: { matchId, active: true, territoryId: { in: [target.id, ...sourceIds] } },
+      select: { territoryId: true, data: true },
+    });
+    const has = (territoryId: string, effect: string) =>
+      structures.some(
+        (structure) =>
+          structure.territoryId === territoryId &&
+          ((structure.data as { effects?: string[] }).effects ?? []).includes(effect),
+      );
+    if (has(target.id, "NO_ATTACK_ON")) {
+      throw conflict("TARGET_BLOCKED", "A military block protects this territory");
+    }
     // One battle at a time per territory (also guaranteed by the BattleLock primary key).
     if (target.inBattle) throw conflict("TERRITORY_IN_BATTLE", "The target is already in a battle");
 
@@ -97,6 +111,12 @@ export class BattleService {
       }
       if (!adjacent.has(source.id)) {
         throw conflict("NOT_ADJACENT", `${source.name} does not border the target`);
+      }
+      if (has(source.id, "NO_ATTACK_FROM")) {
+        throw conflict(
+          "SOURCE_BLOCKED",
+          `${source.name} is under a military block and cannot attack`,
+        );
       }
       if (source.inBattle) {
         throw conflict("TERRITORY_IN_BATTLE", `${source.name} is already in a battle`);
