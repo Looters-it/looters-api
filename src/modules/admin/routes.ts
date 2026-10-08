@@ -40,9 +40,10 @@ export function registerAdminRoutes(app: FastifyInstance, deps: AdminRoutesDeps)
 
   // Revokes a session: it stops being valid and its sockets are closed at once.
   app.delete("/api/admin/sessions/:id", async (request, reply) => {
-    await guard.admin(request);
+    const auth = await guard.admin(request);
     const { id } = sessionParams.parse(request.params);
     if (!(await sessions.revoke(id))) throw notFound("Session");
+    request.log.info({ sessionId: id, byUserId: auth.user.id }, "session revoked by admin");
     return reply.code(204).send();
   });
 }

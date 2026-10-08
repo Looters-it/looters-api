@@ -8,6 +8,7 @@ import { registerErrorHandling } from "./http/errors.js";
 import { registerAdminRoutes } from "./modules/admin/routes.js";
 import { registerAuthRoutes } from "./modules/auth/routes.js";
 import { registerGeoAdminRoutes } from "./modules/geo/admin-routes.js";
+import { registerGeoPublicRoutes } from "./modules/geo/public-routes.js";
 import { registerHealthRoutes, type HealthDeps } from "./modules/health/routes.js";
 import { registerStatsRoutes } from "./modules/stats/routes.js";
 import { RealtimeHub } from "./realtime/hub.js";
@@ -35,6 +36,8 @@ export interface AppDeps {
   auth?: Partial<AuthConfig>;
   /** Where geo files are stored (shared with `jobs`) and how large one may be. */
   uploads?: { dir: string; maxMegabytes: number };
+  /** Memory given to generated map tiles. */
+  tileCacheMegabytes?: number;
   logger?: FastifyServerOptions["logger"];
   /** True behind the web proxy, so that the client address is read from X-Forwarded-For. */
   trustProxy?: boolean;
@@ -72,6 +75,10 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     guard,
     uploadDir: deps.uploads?.dir ?? "./uploads",
     maxUploadBytes: (deps.uploads?.maxMegabytes ?? 300) * 1_048_576,
+  });
+  registerGeoPublicRoutes(app, {
+    prisma: deps.prisma,
+    tileCacheBytes: (deps.tileCacheMegabytes ?? 64) * 1_048_576,
   });
   registerStatsRoutes(app, hub);
   await registerWebSocket(app, hub, guard);

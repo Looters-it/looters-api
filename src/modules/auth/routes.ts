@@ -103,7 +103,13 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthRoutesDeps): 
 
   app.post("/api/auth/logout", async (request, reply) => {
     const auth = await guard.optional(request);
-    if (auth) await sessions.revoke(auth.sessionId);
+    if (auth) {
+      await sessions.revoke(auth.sessionId);
+      request.log.info(
+        { sessionId: auth.sessionId, userId: auth.user.id },
+        "session ended by logout",
+      );
+    }
     reply.clearCookie(cookie.name, { path: "/" });
     return reply.code(204).send();
   });
