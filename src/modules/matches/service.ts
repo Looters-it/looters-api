@@ -520,9 +520,16 @@ export class MatchService {
     });
 
     // Alliances are public: everyone sees who is allied with whom.
-    const members = await this.prisma.allianceMember.findMany({
-      where: { empire: { matchId: id } },
-      select: { empireId: true, allianceId: true, leavesAtTurn: true },
+    const alliances = await this.prisma.alliance.findMany({
+      where: { matchId: id },
+      orderBy: { createdAt: "asc" },
+      select: {
+        id: true,
+        aEmpireId: true,
+        bEmpireId: true,
+        endsAtTurn: true,
+        endedByEmpireId: true,
+      },
     });
     const invites = await this.prisma.allianceInvite.findMany({
       where: { matchId: id, status: "PENDING" },
@@ -542,7 +549,7 @@ export class MatchService {
       battles,
       territoryNames,
       structures,
-      members,
+      alliances,
       invites,
       unitsByEmpire,
     };
@@ -588,7 +595,7 @@ export class MatchService {
     if (!data || (data.match.status === "DRAFT" && data.match.ownerId !== viewer?.user.id)) {
       throw notFound("Match");
     }
-    const { match, empires, territories, territoryNames, structures, members } = data;
+    const { match, empires, territories, territoryNames, structures, alliances } = data;
     const mine = empires.find((empire) => empire.userId === viewer?.user.id) ?? null;
     const currentTurn = Math.max(match.currentTurn, 1);
     const rules = rulesOf(match);
@@ -603,10 +610,12 @@ export class MatchService {
     );
     const unitsOf = (empireId: string) => data.unitsByEmpire.get(empireId) ?? 0;
 
-    const myAlliance = mine ? members.find((member) => member.empireId === mine.id) : undefined;
+    // The viewer's allies: one for each pact they are in.
     const allies = new Set(
-      myAlliance
-        ? members.filter((m) => m.allianceId === myAlliance.allianceId).map((m) => m.empireId)
+      mine
+        ? alliances
+            .filter((pact) => pact.aEmpireId === mine.id || pact.bEmpireId === mine.id)
+            .map((pact) => (pact.aEmpireId === mine.id ? pact.bEmpireId : pact.aEmpireId))
         : [],
     );
     const invites = mine
@@ -720,11 +729,12 @@ export class MatchService {
             : {}),
         };
       }),
-      alliances: [...new Set(members.map((member) => member.allianceId))].map((allianceId) => ({
-        id: allianceId,
-        members: members
-          .filter((member) => member.allianceId === allianceId)
-          .map((member) => ({ empireId: member.empireId, leavesAtTurn: member.leavesAtTurn })),
+      /** Pacts between two empires: public, with the announced end if there is one. */
+      alliances: alliances.map((pact) => ({
+        id: pact.id,
+        empireIds: [pact.aEmpireId, pact.bEmpireId],
+        endsAtTurn: pact.endsAtTurn,
+        endedByEmpireId: pact.endedByEmpireId,
       })),
       /** Proposals waiting for an answer, made by the viewer or to them. */
       invites,

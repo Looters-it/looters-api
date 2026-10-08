@@ -18,7 +18,15 @@ export const BOARD_KINDS = {
   battles: ["BATTLE_RESOLVED"],
   capitals: ["CAPITAL_BUILT", "CAPITAL_MOVED", "CAPITAL_PROMOTED"],
   areas: ["AREA_CREATED", "AREA_RENAMED"],
-  alliances: ["ALLIANCE_FORMED", "ALLIANCE_JOINED", "ALLIANCE_LEFT"],
+  // ALLIANCE_JOINED and ALLIANCE_LEFT are what matches played before pacts recorded.
+  alliances: [
+    "ALLIANCE_FORMED",
+    "ALLIANCE_ENDING",
+    "ALLIANCE_KEPT",
+    "ALLIANCE_ENDED",
+    "ALLIANCE_JOINED",
+    "ALLIANCE_LEFT",
+  ],
   match: ["MATCH_STARTED", "MATCH_FINISHED"],
 } as const;
 

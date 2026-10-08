@@ -31,11 +31,10 @@ export type GameEventInput =
       data: { empireName: string; territoryName: string };
     }
   | {
-      type: "ALLIANCE_FORMED" | "ALLIANCE_JOINED";
+      type: "ALLIANCE_FORMED" | "ALLIANCE_ENDING" | "ALLIANCE_KEPT";
       empireId: string;
       data: { empireName: string; otherName: string };
     }
-  | { type: "ALLIANCE_LEFT"; empireId: string; data: { empireName: string } }
   | { type: "MESSAGE"; empireId: string; data: { empireName: string; text: string } }
   | { type: "MATCH_OPENED" };
 

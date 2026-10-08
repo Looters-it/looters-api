@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
 import { createPrisma } from "../src/db/prisma.js";
 import { EMPIRE_COLORS } from "../src/rules/catalogue.js";
+import { DEFAULT_MATCH_RULES } from "../src/rules/config.js";
 
 // Needs a migrated, disposable database: set TEST_DATABASE_URL (see .env.example).
 const url = process.env.TEST_DATABASE_URL;
@@ -11,7 +12,12 @@ interface State {
   me: { empireId: string } | null;
   empires: { id: string; name: string }[];
   territories: { id: string; name: string; ownerEmpireId: string; resources: number | null }[];
-  alliances: { id: string; members: { empireId: string; leavesAtTurn: number | null }[] }[];
+  alliances: {
+    id: string;
+    empireIds: string[];
+    endsAtTurn: number | null;
+    endedByEmpireId: string | null;
+  }[];
   invites: { id: string; fromEmpireId: string; toEmpireId: string }[];
 }
 
@@ -136,6 +142,14 @@ describe.skipIf(!url)("alliances", () => {
       fromTerritoryIds: [(await territoryOf(from)).id],
       turn: 5,
     });
+  /** The id of the pact between two players. */
+  const pactOf = async (a: string, b: string) =>
+    (await state(null)).alliances.find(
+      (pact) =>
+        pact.empireIds.includes(empire[a] ?? "") && pact.empireIds.includes(empire[b] ?? ""),
+    )?.id ?? "none";
+  const pactRoute = async (a: string, b: string, action: string) =>
+    `/api/matches/${matchId}/alliances/${await pactOf(a, b)}/${action}`;
   const errorCode = (response: { json: () => unknown }) =>
     (response.json() as { error?: { code: string } }).error?.code;
 
@@ -155,9 +169,10 @@ describe.skipIf(!url)("alliances", () => {
       for (const viewer of ["carla", null]) {
         const seen = await state(viewer);
         expect(seen.alliances).toHaveLength(1);
-        expect(seen.alliances[0]?.members.map((m) => m.empireId).sort()).toEqual(
+        expect([...(seen.alliances[0]?.empireIds ?? [])].sort()).toEqual(
           [empire.anna, empire.bruno].sort(),
         );
+        expect(seen.alliances[0]).toMatchObject({ endsAtTurn: null, endedByEmpireId: null });
       }
       const event = await prisma.gameEvent.findFirstOrThrow({ where: { type: "ALLIANCE_FORMED" } });
       expect(event.data).toEqual({ empireName: "anna", otherName: "bruno" });
@@ -178,25 +193,44 @@ describe.skipIf(!url)("alliances", () => {
       expect(await prisma.alliance.count()).toBe(0);
     });
 
-    it("admits a third member and stops at the maximum of three", async () => {
+    it("is a pact between two: sharing an ally does not make two empires allies", async () => {
       await ally("anna", "bruno");
       await ally("bruno", "carla");
-      expect((await state(null)).alliances[0]?.members).toHaveLength(3);
-      const joined = await prisma.gameEvent.findFirstOrThrow({
-        where: { type: "ALLIANCE_JOINED" },
-      });
-      expect(joined.data).toEqual({ empireName: "carla", otherName: "bruno" });
+      expect((await state(null)).alliances).toHaveLength(2);
 
-      expect(errorCode(await invite("anna", "dario"))).toBe("ALLIANCE_FULL");
+      // Anna and Carla are both allied with Bruno, and nothing to each other.
+      expect(errorCode(await attack("carla", 1, 2))).toBe("TARGET_IS_ALLY");
+      const card = await as("anna", "GET", `/api/matches/${matchId}/units/${unit[2]}`);
+      expect(card.json<{ territory: { resources: unknown } }>().territory.resources).toBeNull();
+      // They can still make a pact of their own.
+      await prisma.match.update({
+        where: { id: matchId },
+        data: { config: { ...DEFAULT_MATCH_RULES, allianceMaxAllies: 3 } },
+      });
+      await ally("anna", "carla");
+      expect((await state(null)).alliances).toHaveLength(3);
     });
 
-    it("keeps an empire in one alliance only", async () => {
+    it("stops at the number of allies the match allows, on either side", async () => {
       await ally("anna", "bruno");
-      // Carla cannot pull Bruno into another alliance, nor propose twice the same thing.
-      expect(errorCode(await invite("carla", "bruno"))).toBe("TARGET_IN_ALLIANCE");
+      await ally("anna", "carla");
+      // Two is the default: Anna cannot propose a third, nor accept one.
+      expect(errorCode(await invite("anna", "dario"))).toBe("TOO_MANY_ALLIES");
+      await invite("dario", "anna");
+      expect(errorCode(await answer("anna", "accept", "dario"))).toBe("TOO_MANY_ALLIES");
+      // A proposal made while there was room no longer stands once the proposer is full.
+      await invite("bruno", "dario");
+      await ally("bruno", "carla");
+      expect(errorCode(await answer("dario", "accept", "bruno"))).toBe("PROPOSAL_EXPIRED");
+    });
+
+    it("refuses what makes no sense: twice the same, oneself, allies again, guests", async () => {
       await invite("carla", "dario");
       expect(errorCode(await invite("carla", "dario"))).toBe("ALREADY_INVITED");
       expect((await invite("anna", "anna")).statusCode).toBe(404);
+      await ally("anna", "bruno");
+      expect(errorCode(await invite("anna", "bruno"))).toBe("ALREADY_ALLIES");
+      expect(errorCode(await invite("bruno", "anna"))).toBe("ALREADY_ALLIES");
       expect(
         (
           await as(null, "POST", `/api/matches/${matchId}/alliances/invites`, {
@@ -206,12 +240,14 @@ describe.skipIf(!url)("alliances", () => {
       ).toBe(401);
     });
 
-    it("drops the other pending proposals of two empires that ally", async () => {
+    it("answers a crossed proposal between the same two, and leaves the others pending", async () => {
       await invite("carla", "bruno");
       await invite("anna", "bruno");
+      await invite("bruno", "anna");
       await answer("bruno", "accept", "anna");
-      expect((await state("carla")).invites).toEqual([]);
-      expect((await state("bruno")).invites).toEqual([]);
+      expect((await state("anna")).invites).toEqual([]);
+      // Carla's proposal to Bruno is still his to answer: he may have several allies.
+      expect((await state("bruno")).invites).toMatchObject([{ fromEmpireId: empire.carla }]);
     });
 
     it("refuses an alliance between two empires that are fighting", async () => {
@@ -232,37 +268,61 @@ describe.skipIf(!url)("alliances", () => {
     expect((await attack("bruno", 2, 1)).statusCode).toBe(201);
   });
 
-  describe("leaving", () => {
+  describe("ending an alliance", () => {
     it("takes effect at the end of the following turn: until then the attack ban holds", async () => {
       await ally("anna", "bruno");
-      const response = await as("anna", "POST", `/api/matches/${matchId}/alliances/leave`);
+      const response = await as("anna", "POST", await pactRoute("anna", "bruno", "end"));
       expect(response.statusCode, response.body).toBe(200);
 
       // Announced in turn 5 with one turn of notice: effective when turn 6 closes.
-      const member = (await state(null)).alliances[0]?.members.find(
-        (m) => m.empireId === empire.anna,
-      );
-      expect(member?.leavesAtTurn).toBe(6);
-      const event = await prisma.gameEvent.findFirstOrThrow({ where: { type: "ALLIANCE_LEFT" } });
-      expect(event.data).toEqual({ empireName: "anna" });
+      expect((await state(null)).alliances[0]).toMatchObject({
+        endsAtTurn: 6,
+        endedByEmpireId: empire.anna,
+      });
+      const event = await prisma.gameEvent.findFirstOrThrow({ where: { type: "ALLIANCE_ENDING" } });
+      expect(event.data).toEqual({ empireName: "anna", otherName: "bruno" });
 
       // No instant betrayal.
       expect(errorCode(await attack("anna", 1, 0))).toBe("TARGET_IS_ALLY");
       expect(errorCode(await attack("bruno", 0, 1))).toBe("TARGET_IS_ALLY");
-      expect(errorCode(await as("anna", "POST", `/api/matches/${matchId}/alliances/leave`))).toBe(
-        "LEAVING_ALLIANCE",
+      expect(errorCode(await as("bruno", "POST", await pactRoute("anna", "bruno", "end")))).toBe(
+        "ALLIANCE_ENDING",
       );
-      expect(errorCode(await invite("anna", "carla"))).toBe("LEAVING_ALLIANCE");
-      expect(errorCode(await as("carla", "POST", `/api/matches/${matchId}/alliances/leave`))).toBe(
-        "NOT_IN_ALLIANCE",
+      // A pact is its two empires' business only.
+      expect((await as("carla", "POST", await pactRoute("anna", "bruno", "end"))).statusCode).toBe(
+        404,
       );
     });
 
-    it("frees the attack once jobs has made the exit effective", async () => {
+    it("can be taken back by who announced it, and only by them", async () => {
       await ally("anna", "bruno");
-      await as("anna", "POST", `/api/matches/${matchId}/alliances/leave`);
+      expect(errorCode(await as("anna", "POST", await pactRoute("anna", "bruno", "keep")))).toBe(
+        "ALLIANCE_NOT_ENDING",
+      );
+      await as("anna", "POST", await pactRoute("anna", "bruno", "end"));
+      expect(errorCode(await as("bruno", "POST", await pactRoute("anna", "bruno", "keep")))).toBe(
+        "NOT_YOUR_ANNOUNCEMENT",
+      );
+      const kept = await as("anna", "POST", await pactRoute("anna", "bruno", "keep"));
+      expect(kept.statusCode, kept.body).toBe(200);
+      expect((await state(null)).alliances[0]).toMatchObject({
+        endsAtTurn: null,
+        endedByEmpireId: null,
+      });
+      const event = await prisma.gameEvent.findFirstOrThrow({ where: { type: "ALLIANCE_KEPT" } });
+      expect(event.data).toEqual({ empireName: "anna", otherName: "bruno" });
+      // Having taken it back, it can be announced again.
+      expect((await as("bruno", "POST", await pactRoute("anna", "bruno", "end"))).statusCode).toBe(
+        200,
+      );
+    });
+
+    it("ends that pact alone, and frees the attack once jobs has made it effective", async () => {
+      await ally("anna", "bruno");
+      await ally("anna", "carla");
+      await as("anna", "POST", await pactRoute("anna", "bruno", "end"));
       // What jobs does when turn 6 closes.
-      await prisma.allianceMember.deleteMany();
+      await prisma.alliance.deleteMany({ where: { endsAtTurn: { not: null } } });
       await prisma.match.update({ where: { id: matchId }, data: { currentTurn: 7 } });
       const response = await as("anna", "POST", `/api/matches/${matchId}/attacks`, {
         targetGeoUnitId: unit[1],
@@ -270,6 +330,7 @@ describe.skipIf(!url)("alliances", () => {
         turn: 7,
       });
       expect(response.statusCode).toBe(201);
+      expect((await state(null)).alliances).toHaveLength(1);
     });
   });
 
@@ -280,27 +341,29 @@ describe.skipIf(!url)("alliances", () => {
     it("shows allies each other's resources, and nobody else's", async () => {
       expect(await resourcesOf("anna", "bruno")).toBeNull();
       await ally("anna", "bruno");
+      await ally("bruno", "carla");
 
       expect(await resourcesOf("anna", "bruno")).toBe(100);
       expect(await resourcesOf("bruno", "anna")).toBe(100);
-      // Not allies: still hidden, in both directions.
+      expect(await resourcesOf("bruno", "carla")).toBe(100);
+      // The ally of an ally is a stranger: hidden, in both directions.
       expect(await resourcesOf("anna", "carla")).toBeNull();
       expect(await resourcesOf("carla", "anna")).toBeNull();
       expect(await resourcesOf(null, "anna")).toBeNull();
       // The card of an ally's municipality shows the amount too.
       const card = await as("anna", "GET", `/api/matches/${matchId}/units/${unit[1]}`);
       expect(card.json<{ territory: { resources: number } }>().territory.resources).toBe(100);
-      const stranger = await as("carla", "GET", `/api/matches/${matchId}/units/${unit[1]}`);
+      const stranger = await as("dario", "GET", `/api/matches/${matchId}/units/${unit[1]}`);
       expect(stranger.json<{ territory: { resources: unknown } }>().territory.resources).toBeNull();
     });
 
-    it("is revoked when the exit takes effect, not before", async () => {
+    it("is revoked when the end takes effect, not before", async () => {
       await ally("anna", "bruno");
-      await as("anna", "POST", `/api/matches/${matchId}/alliances/leave`);
+      await as("anna", "POST", await pactRoute("anna", "bruno", "end"));
       // Still an ally during the notice.
       expect(await resourcesOf("anna", "bruno")).toBe(100);
 
-      await prisma.allianceMember.deleteMany(); // jobs, at the close of the notice turn
+      await prisma.alliance.deleteMany(); // jobs, at the close of the notice turn
       expect(await resourcesOf("anna", "bruno")).toBeNull();
       expect(await resourcesOf("bruno", "anna")).toBeNull();
     });
@@ -315,14 +378,16 @@ describe.skipIf(!url)("alliances", () => {
         turn,
       });
 
-    it("moves resources from an own territory to an ally's, at no cost", async () => {
+    it("moves resources from an own territory to an ally's, at no cost and at any distance", async () => {
       await ally("anna", "bruno");
       const response = await transfer("anna", 0, 1, 60);
       expect(response.statusCode, response.body).toBe(200);
       expect((await territoryOf(0)).resources).toBe(40);
       expect((await territoryOf(1)).resources).toBe(160);
-      // Territories need not be adjacent: allies in an alliance of three can reach each other.
+      // Territories need not be adjacent; the ally of an ally is not reached.
       await ally("bruno", "carla");
+      expect(errorCode(await transfer("anna", 0, 2, 40))).toBe("NOT_AN_ALLY");
+      await ally("anna", "carla");
       expect((await transfer("anna", 0, 2, 40)).statusCode).toBe(200);
       expect((await territoryOf(0)).resources).toBe(0);
     });
@@ -348,11 +413,12 @@ describe.skipIf(!url)("alliances", () => {
   });
 
   describe("alliance chat", () => {
-    const chat = (user: string | null) => as(user, "GET", `/api/matches/${matchId}/alliances/chat`);
-    const say = (user: string, text: string) =>
-      as(user, "POST", `/api/matches/${matchId}/alliances/chat`, { text });
+    const chat = async (user: string | null, a = "anna", b = "bruno") =>
+      as(user, "GET", await pactRoute(a, b, "chat"));
+    const say = async (user: string, text: string, a = "anna", b = "bruno") =>
+      as(user, "POST", await pactRoute(a, b, "chat"), { text });
 
-    it("is private to the members of the alliance", async () => {
+    it("is private to the two empires of the pact", async () => {
       await ally("anna", "bruno");
       expect((await say("anna", "Attacchiamo a est?")).statusCode).toBe(201);
       expect((await say("bruno", "Al prossimo turno.")).statusCode).toBe(201);
@@ -364,19 +430,27 @@ describe.skipIf(!url)("alliances", () => {
       ]);
       expect(seen[1]?.empireId).toBe(empire.anna);
 
-      expect(errorCode(await chat("carla"))).toBe("NOT_IN_ALLIANCE");
-      expect(errorCode(await say("carla", "Ciao"))).toBe("NOT_IN_ALLIANCE");
+      expect((await chat("carla")).statusCode).toBe(404);
+      expect((await say("carla", "Ciao")).statusCode).toBe(404);
       expect((await chat(null)).statusCode).toBe(401);
       // The chat never reaches the public board.
       const board = await as(null, "GET", `/api/matches/${matchId}/board`);
       expect(board.body).not.toContain("Attacchiamo");
     });
 
-    it("is not readable by another alliance", async () => {
+    it("is one conversation per pact: the other ally of an ally reads nothing of it", async () => {
       await ally("anna", "bruno");
-      await ally("carla", "dario");
+      await ally("bruno", "carla");
       await say("anna", "Segreto");
-      expect((await chat("carla")).json()).toEqual([]);
+      await say("carla", "Altro discorso", "bruno", "carla");
+      // Bruno is in both and reads each on its own; Carla cannot open the first.
+      expect((await chat("bruno")).json<{ text: string }[]>().map((m) => m.text)).toEqual([
+        "Segreto",
+      ]);
+      expect(
+        (await chat("bruno", "bruno", "carla")).json<{ text: string }[]>().map((m) => m.text),
+      ).toEqual(["Altro discorso"]);
+      expect((await chat("carla")).statusCode).toBe(404);
     });
   });
 });

@@ -1,4 +1,4 @@
-import type { Prisma, PrismaClient } from "@prisma/client";
+import type { Alliance, Prisma, PrismaClient } from "@prisma/client";
 import { z } from "zod";
 import type { AuthContext } from "../../auth/sessions.js";
 import { recordEvent } from "../../events/events.js";
@@ -17,22 +17,30 @@ export const transferBody = z.strictObject({
 });
 export const chatBody = z.strictObject({ text: z.string().trim().min(1).max(5000) });
 
-/** The alliance an empire belongs to, if any. */
-export async function allianceOf(db: Tx | PrismaClient, empireId: string) {
-  return db.allianceMember.findUnique({ where: { empireId } });
+/** The two empires of a pact in the order they are stored in. */
+const pair = (x: string, y: string) =>
+  x < y ? { aEmpireId: x, bEmpireId: y } : { aEmpireId: y, bEmpireId: x };
+
+/** The pact between two empires, if there is one. */
+export async function allianceBetween(db: Tx | PrismaClient, x: string, y: string) {
+  return db.alliance.findUnique({ where: { aEmpireId_bEmpireId: pair(x, y) } });
 }
 
-/** Whether two empires are allies right now (an announced exit counts until it takes effect). */
-export async function areAllies(db: Tx | PrismaClient, a: string, b: string): Promise<boolean> {
-  const members = await db.allianceMember.findMany({ where: { empireId: { in: [a, b] } } });
-  return members.length === 2 && members[0]?.allianceId === members[1]?.allianceId;
+/** Whether two empires are allies right now (an announced end counts until it takes effect). */
+export async function areAllies(db: Tx | PrismaClient, x: string, y: string): Promise<boolean> {
+  return (await allianceBetween(db, x, y)) !== null;
 }
+
+const otherOf = (alliance: Alliance, empireId: string) =>
+  alliance.aEmpireId === empireId ? alliance.bEmpireId : alliance.aEmpireId;
 
 /**
  * Alliances (PROMPT §2.6): allies cannot attack each other, see each other's
- * resources and can send resources to each other. An empire is in at most
- * one alliance (the primary key of AllianceMember); leaving takes effect at
- * the end of the following turn, so there is no instant betrayal.
+ * resources and can send resources to each other. An alliance is a pact
+ * between two empires and nothing more: being allied with the same empire
+ * does not make two others allies. Ending one takes effect at the end of the
+ * following turn, so there is no instant betrayal, and until then whoever
+ * announced it can take it back.
  */
 export class AllianceService {
   onChange: (matchId: string, kind: string) => void = () => undefined;
@@ -50,7 +58,20 @@ export class AllianceService {
     return empire;
   }
 
-  /** Proposes an alliance to another empire, or invites it into the proposer's alliance. */
+  private alliesOf(tx: Tx | PrismaClient, empireId: string) {
+    return tx.alliance.count({ where: { OR: [{ aEmpireId: empireId }, { bEmpireId: empireId }] } });
+  }
+
+  /** The viewer's pact with that id. */
+  private async mine(tx: Tx | PrismaClient, matchId: string, allianceId: string, empireId: string) {
+    const alliance = await tx.alliance.findFirst({
+      where: { id: allianceId, matchId, OR: [{ aEmpireId: empireId }, { bEmpireId: empireId }] },
+    });
+    if (!alliance) throw notFound("Alliance");
+    return alliance;
+  }
+
+  /** Proposes an alliance to another empire. */
   async invite(matchId: string, body: z.infer<typeof inviteBody>, viewer: AuthContext) {
     await this.prisma.$transaction(async (tx) => {
       const { empire, rules } = await acting(tx, matchId, viewer);
@@ -58,30 +79,18 @@ export class AllianceService {
         where: { id: body.toEmpireId, matchId, status: "ACTIVE" },
       });
       if (!target || target.id === empire.id) throw notFound("Empire");
-      if (await allianceOf(tx, target.id)) {
-        throw conflict("TARGET_IN_ALLIANCE", "That empire is already in an alliance");
+      if (await areAllies(tx, empire.id, target.id)) {
+        throw conflict("ALREADY_ALLIES", "You are already allies");
       }
-      const mine = await allianceOf(tx, empire.id);
-      if (mine?.leavesAtTurn != null) {
-        throw conflict("LEAVING_ALLIANCE", "You are leaving your alliance: you cannot invite");
-      }
-      if (mine) {
-        const members = await tx.allianceMember.count({ where: { allianceId: mine.allianceId } });
-        if (members >= rules.allianceMaxMembers) {
-          throw conflict("ALLIANCE_FULL", "Your alliance has no room");
-        }
+      if ((await this.alliesOf(tx, empire.id)) >= rules.allianceMaxAllies) {
+        throw conflict("TOO_MANY_ALLIES", "You have as many allies as the match allows");
       }
       const pending = await tx.allianceInvite.findFirst({
         where: { matchId, fromEmpireId: empire.id, toEmpireId: target.id, status: "PENDING" },
       });
       if (pending) throw conflict("ALREADY_INVITED", "You have already proposed it");
       await tx.allianceInvite.create({
-        data: {
-          matchId,
-          allianceId: mine?.allianceId ?? null,
-          fromEmpireId: empire.id,
-          toEmpireId: target.id,
-        },
+        data: { matchId, fromEmpireId: empire.id, toEmpireId: target.id },
       });
     });
     this.onChange(matchId, "alliances");
@@ -110,75 +119,57 @@ export class AllianceService {
         return;
       }
 
-      if (await allianceOf(tx, empire.id)) {
-        throw conflict("ALREADY_IN_ALLIANCE", "You are already in an alliance");
-      }
-      const proposer = await tx.empire.findUnique({ where: { id: invite.fromEmpireId } });
-      if (proposer?.status !== "ACTIVE")
+      // The proposer's row is locked too, so that two acceptances cannot both fit under
+      // its limit. (The viewer's is already held by `acting`.)
+      const proposers = await tx.$queryRaw<{ id: string; name: string; status: string }[]>`
+        SELECT id, name, status::text FROM "Empire" WHERE id = ${invite.fromEmpireId} FOR UPDATE`;
+      const proposer = proposers[0];
+      if (proposer?.status !== "ACTIVE") {
         throw conflict("PROPOSAL_EXPIRED", "That empire has fallen");
-      const proposerMember = await allianceOf(tx, proposer.id);
-      // The proposal stands only if the proposer is where they were when they made it.
-      if (
-        (proposerMember?.allianceId ?? null) !== invite.allianceId ||
-        proposerMember?.leavesAtTurn != null
-      ) {
-        throw conflict("PROPOSAL_EXPIRED", "The proposal is no longer valid");
       }
-
-      const currentMembers = invite.allianceId
-        ? (await tx.allianceMember.findMany({ where: { allianceId: invite.allianceId } })).map(
-            (member) => member.empireId,
-          )
-        : [proposer.id];
-      if (currentMembers.length >= rules.allianceMaxMembers) {
-        throw conflict("ALLIANCE_FULL", "The alliance has no room");
+      if (await areAllies(tx, empire.id, proposer.id)) {
+        throw conflict("ALREADY_ALLIES", "You are already allies");
       }
-      // Allies cannot be at war: no open battle between the newcomer and any member.
+      if ((await this.alliesOf(tx, empire.id)) >= rules.allianceMaxAllies) {
+        throw conflict("TOO_MANY_ALLIES", "You have as many allies as the match allows");
+      }
+      if ((await this.alliesOf(tx, proposer.id)) >= rules.allianceMaxAllies) {
+        throw conflict("PROPOSAL_EXPIRED", "That empire has no room for another ally");
+      }
+      // Allies cannot be at war with each other.
       const atWar = await tx.battle.count({
         where: {
           matchId,
           status: "OPEN",
           OR: [
-            { attackerEmpireId: empire.id, defenderEmpireId: { in: currentMembers } },
-            { defenderEmpireId: empire.id, attackerEmpireId: { in: currentMembers } },
+            { attackerEmpireId: empire.id, defenderEmpireId: proposer.id },
+            { defenderEmpireId: empire.id, attackerEmpireId: proposer.id },
           ],
         },
       });
-      if (atWar > 0)
-        throw conflict("ALLIANCE_AT_WAR", "You are fighting a member of that alliance");
+      if (atWar > 0) throw conflict("ALLIANCE_AT_WAR", "You are fighting that empire");
 
-      let allianceId = invite.allianceId;
-      if (!allianceId) {
-        const alliance = await tx.alliance.create({
-          data: { matchId, createdTurn: match.currentTurn },
-        });
-        allianceId = alliance.id;
-        await tx.allianceMember.create({
-          data: { allianceId, empireId: proposer.id, joinedTurn: match.currentTurn },
-        });
-      }
-      await tx.allianceMember.create({
-        data: { allianceId, empireId: empire.id, joinedTurn: match.currentTurn },
+      await tx.alliance.create({
+        data: { matchId, createdTurn: match.currentTurn, ...pair(empire.id, proposer.id) },
       });
       await tx.allianceInvite.update({
         where: { id: invite.id },
-        data: { status: "ACCEPTED", respondedAt: new Date(), allianceId },
+        data: { status: "ACCEPTED", respondedAt: new Date() },
       });
-      // Whatever else was pending for the two of them no longer makes sense.
+      // A proposal the other way round between the same two is answered by this one.
       await tx.allianceInvite.updateMany({
         where: {
           matchId,
           status: "PENDING",
-          OR: [{ toEmpireId: empire.id }, { toEmpireId: proposer.id }, { fromEmpireId: empire.id }],
+          fromEmpireId: empire.id,
+          toEmpireId: proposer.id,
         },
-        data: { status: "DECLINED", respondedAt: new Date() },
+        data: { status: "ACCEPTED", respondedAt: new Date() },
       });
       await recordEvent(tx, matchId, match.currentTurn, {
-        type: invite.allianceId ? "ALLIANCE_JOINED" : "ALLIANCE_FORMED",
-        empireId: invite.allianceId ? empire.id : proposer.id,
-        data: invite.allianceId
-          ? { empireName: empire.name, otherName: proposer.name }
-          : { empireName: proposer.name, otherName: empire.name },
+        type: "ALLIANCE_FORMED",
+        empireId: proposer.id,
+        data: { empireName: proposer.name, otherName: empire.name },
       });
     });
     this.onChange(matchId, "alliances");
@@ -186,24 +177,58 @@ export class AllianceService {
   }
 
   /**
-   * Announces the exit from the alliance. It takes effect when the following
-   * turn ends: until then the empire is still an ally in every respect.
+   * Announces the end of an alliance. It takes effect when the following turn
+   * ends: until then the two are still allies in every respect.
    */
-  async leave(matchId: string, viewer: AuthContext) {
+  async end(matchId: string, allianceId: string, viewer: AuthContext) {
     await this.prisma.$transaction(async (tx) => {
       const { match, empire, rules } = await acting(tx, matchId, viewer);
-      const member = await allianceOf(tx, empire.id);
-      if (!member) throw conflict("NOT_IN_ALLIANCE", "You are not in an alliance");
-      if (member.leavesAtTurn !== null)
-        throw conflict("LEAVING_ALLIANCE", "You are already leaving");
-      await tx.allianceMember.update({
-        where: { empireId: empire.id },
-        data: { leavesAtTurn: match.currentTurn + rules.allianceLeaveNoticeTurns },
+      const alliance = await this.mine(tx, matchId, allianceId, empire.id);
+      if (alliance.endsAtTurn !== null) {
+        throw conflict("ALLIANCE_ENDING", "The end of this alliance is already announced");
+      }
+      await tx.alliance.update({
+        where: { id: alliance.id },
+        data: {
+          endsAtTurn: match.currentTurn + rules.allianceLeaveNoticeTurns,
+          endedByEmpireId: empire.id,
+        },
+      });
+      const other = await tx.empire.findUniqueOrThrow({
+        where: { id: otherOf(alliance, empire.id) },
       });
       await recordEvent(tx, matchId, match.currentTurn, {
-        type: "ALLIANCE_LEFT",
+        type: "ALLIANCE_ENDING",
         empireId: empire.id,
-        data: { empireName: empire.name },
+        data: { empireName: empire.name, otherName: other.name },
+      });
+    });
+    this.onChange(matchId, "alliances");
+    return this.matches.state(matchId, viewer);
+  }
+
+  /** Takes back the announced end: only who announced it can, while it has not happened yet. */
+  async keep(matchId: string, allianceId: string, viewer: AuthContext) {
+    await this.prisma.$transaction(async (tx) => {
+      const { match, empire } = await acting(tx, matchId, viewer);
+      const alliance = await this.mine(tx, matchId, allianceId, empire.id);
+      if (alliance.endsAtTurn === null) {
+        throw conflict("ALLIANCE_NOT_ENDING", "No end was announced for this alliance");
+      }
+      if (alliance.endedByEmpireId !== empire.id) {
+        throw conflict("NOT_YOUR_ANNOUNCEMENT", "Only who announced the end can take it back");
+      }
+      await tx.alliance.update({
+        where: { id: alliance.id },
+        data: { endsAtTurn: null, endedByEmpireId: null },
+      });
+      const other = await tx.empire.findUniqueOrThrow({
+        where: { id: otherOf(alliance, empire.id) },
+      });
+      await recordEvent(tx, matchId, match.currentTurn, {
+        type: "ALLIANCE_KEPT",
+        empireId: empire.id,
+        data: { empireName: empire.name, otherName: other.name },
       });
     });
     this.onChange(matchId, "alliances");
@@ -249,33 +274,36 @@ export class AllianceService {
     return this.matches.state(matchId, viewer);
   }
 
-  /** The private conversation of the viewer's alliance, newest first. */
-  async chat(matchId: string, viewer: AuthContext) {
+  /** The private conversation of an alliance, between its two empires, newest first. */
+  async chat(matchId: string, allianceId: string, viewer: AuthContext) {
     const empire = await this.empireOfViewer(this.prisma, matchId, viewer);
-    const member = await allianceOf(this.prisma, empire.id);
-    if (!member) throw conflict("NOT_IN_ALLIANCE", "You are not in an alliance");
+    const alliance = await this.mine(this.prisma, matchId, allianceId, empire.id);
     return this.prisma.allianceMessage.findMany({
-      where: { allianceId: member.allianceId },
+      where: { allianceId: alliance.id },
       orderBy: { createdAt: "desc" },
       take: 100,
       select: { id: true, empireId: true, text: true, createdAt: true },
     });
   }
 
-  async say(matchId: string, body: z.infer<typeof chatBody>, viewer: AuthContext) {
+  async say(
+    matchId: string,
+    allianceId: string,
+    body: z.infer<typeof chatBody>,
+    viewer: AuthContext,
+  ) {
     const match = await this.prisma.match.findUnique({ where: { id: matchId } });
     if (!match) throw notFound("Match");
     const max = (match.config as Prisma.JsonObject).boardMaxChars;
     if (typeof max === "number" && body.text.length > max) {
-      throw new AppError(400, "MESSAGE_TOO_LONG", `At most ${max} characters`);
+      throw new AppError(400, "MESSAGE_TOO_LONG", `At most ${String(max)} characters`);
     }
     const empire = await this.empireOfViewer(this.prisma, matchId, viewer);
-    const member = await allianceOf(this.prisma, empire.id);
-    if (!member) throw conflict("NOT_IN_ALLIANCE", "You are not in an alliance");
+    const alliance = await this.mine(this.prisma, matchId, allianceId, empire.id);
     await this.prisma.allianceMessage.create({
-      data: { allianceId: member.allianceId, empireId: empire.id, text: body.text },
+      data: { allianceId: alliance.id, empireId: empire.id, text: body.text },
     });
     this.onChange(matchId, "alliance-chat");
-    return this.chat(matchId, viewer);
+    return this.chat(matchId, allianceId, viewer);
   }
 }

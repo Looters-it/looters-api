@@ -48,7 +48,8 @@ const matchRulesBase = z.strictObject({
   blockCooldownTurns: count.default(5),
 
   // Alliances (§2.6, §9 #9)
-  allianceMaxMembers: z.number().int().min(2).default(3),
+  // Alliances are pacts between two empires: this is how many an empire may hold at once.
+  allianceMaxAllies: z.number().int().min(1).default(2),
   allianceLeaveNoticeTurns: count.default(1),
 
   // Board (§2.11)

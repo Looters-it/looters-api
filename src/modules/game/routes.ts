@@ -20,6 +20,7 @@ import {
 } from "./service.js";
 
 const matchParams = z.object({ id: z.string().min(1) });
+const allianceParams = matchParams.extend({ allianceId: z.string().min(1) });
 const unitParams = matchParams.extend({ geoUnitId: z.coerce.number().int().positive() });
 
 const battleParams = matchParams.extend({ battleId: z.string().min(1) });
@@ -133,22 +134,28 @@ export function registerGameRoutes(
       return alliances.answer(id, inviteId, action, auth);
     });
   }
-  app.post("/api/matches/:id/alliances/leave", async (request) => {
-    const auth = await guard.user(request);
-    return alliances.leave(matchParams.parse(request.params).id, auth);
-  });
+  for (const action of ["end", "keep"] as const) {
+    app.post(`/api/matches/:id/alliances/:allianceId/${action}`, async (request) => {
+      const auth = await guard.user(request);
+      const { id, allianceId } = allianceParams.parse(request.params);
+      return alliances[action](id, allianceId, auth);
+    });
+  }
   app.post("/api/matches/:id/alliances/transfer", async (request) => {
     const auth = await guard.user(request);
     const { id } = matchParams.parse(request.params);
     return alliances.transfer(id, transferBody.parse(request.body), auth);
   });
-  app.get("/api/matches/:id/alliances/chat", async (request) => {
+  app.get("/api/matches/:id/alliances/:allianceId/chat", async (request) => {
     const auth = await guard.user(request);
-    return alliances.chat(matchParams.parse(request.params).id, auth);
+    const { id, allianceId } = allianceParams.parse(request.params);
+    return alliances.chat(id, allianceId, auth);
   });
-  app.post("/api/matches/:id/alliances/chat", async (request, reply) => {
+  app.post("/api/matches/:id/alliances/:allianceId/chat", async (request, reply) => {
     const auth = await guard.user(request);
-    const { id } = matchParams.parse(request.params);
-    return reply.code(201).send(await alliances.say(id, chatBody.parse(request.body), auth));
+    const { id, allianceId } = allianceParams.parse(request.params);
+    return reply
+      .code(201)
+      .send(await alliances.say(id, allianceId, chatBody.parse(request.body), auth));
   });
 }

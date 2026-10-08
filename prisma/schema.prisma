@@ -244,7 +244,8 @@ model Empire {
   fallenTurn          Int?
   territories         Territory[]
   structures          Structure[]
-  allianceMembership  AllianceMember?
+  alliancesAsA        Alliance[]       @relation("allianceA")
+  alliancesAsB        Alliance[]       @relation("allianceB")
 
   @@unique([matchId, userId])
   @@unique([matchId, name])
@@ -370,39 +371,32 @@ model Structure {
 
 // ---------- Alliances ----------
 
+// A pact between two empires. Alliances do not form groups: A may be allied with B and
+// with C while B and C are not. The pair is stored in order (a < b) and is unique.
 model Alliance {
-  id          String            @id @default(cuid())
-  matchId     String
-  match       Match             @relation(fields: [matchId], references: [id], onDelete: Cascade)
-  createdTurn Int
-  createdAt   DateTime          @default(now())
-  dissolvedAt DateTime?
-  members     AllianceMember[]
-  invites     AllianceInvite[]
-  messages    AllianceMessage[]
+  id              String            @id @default(cuid())
+  matchId         String
+  match           Match             @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  aEmpireId       String
+  a               Empire            @relation("allianceA", fields: [aEmpireId], references: [id], onDelete: Cascade)
+  bEmpireId       String
+  b               Empire            @relation("allianceB", fields: [bEmpireId], references: [id], onDelete: Cascade)
+  createdTurn     Int
+  createdAt       DateTime          @default(now())
+  // Set when one of the two announces the end: the row is removed at that turn's close,
+  // unless the same empire takes the announcement back first.
+  endsAtTurn      Int?
+  endedByEmpireId String?
+  messages        AllianceMessage[]
 
+  @@unique([aEmpireId, bEmpireId])
   @@index([matchId])
-}
-
-// empireId is the primary key: an empire is in at most one alliance.
-model AllianceMember {
-  empireId     String   @id
-  empire       Empire   @relation(fields: [empireId], references: [id], onDelete: Cascade)
-  allianceId   String
-  alliance     Alliance @relation(fields: [allianceId], references: [id], onDelete: Cascade)
-  joinedTurn   Int
-  // Set when the empire announces it is leaving; the row is removed at that turn's close.
-  leavesAtTurn Int?
-
-  @@index([allianceId])
+  @@index([bEmpireId])
 }
 
 model AllianceInvite {
   id           String               @id @default(cuid())
   matchId      String
-  // Null while the proposal would found a new alliance.
-  allianceId   String?
-  alliance     Alliance?            @relation(fields: [allianceId], references: [id], onDelete: Cascade)
   fromEmpireId String
   toEmpireId   String
   status       AllianceInviteStatus @default(PENDING)

@@ -25,7 +25,7 @@ describe("match rules configuration", () => {
       blockCost: 300,
       blockTurns: 5,
       blockCooldownTurns: 5,
-      allianceMaxMembers: 3,
+      allianceMaxAllies: 2,
       boardMaxChars: 500,
     });
   });
