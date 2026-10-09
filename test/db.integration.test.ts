@@ -81,8 +81,13 @@ describe.skipIf(!url)("database integration", () => {
       });
     }
 
-    it("starts a match as a draft", async () => {
-      expect((await createMatch()).status).toBe("DRAFT");
+    it("starts a match as planned, multiplayer, normal and public", async () => {
+      expect(await createMatch()).toMatchObject({
+        status: "PLANNED",
+        mode: "MULTIPLAYER",
+        pace: "NORMAL",
+        visibility: "PUBLIC",
+      });
     });
 
     it("refuses negative resources on a territory", async () => {

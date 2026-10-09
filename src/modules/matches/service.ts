@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { Prisma, type Match, type PrismaClient } from "@prisma/client";
 import type { AuthContext } from "../../auth/sessions.js";
 import { recordEvent } from "../../events/events.js";
@@ -11,7 +11,8 @@ import { turnIncome } from "../../rules/income.js";
 import { structureDefinition } from "../../rules/structures.js";
 import type { z } from "zod";
 import {
-  OPEN_EDITABLE,
+  PLANNED_EDITABLE,
+  RUSH_TURN_SECONDS,
   type createMatchBody,
   type empireBody,
   type joinBody,
@@ -23,6 +24,14 @@ type Tx = Prisma.TransactionClient;
 type Viewer = AuthContext | null;
 
 const conflict = (code: string, message: string) => new AppError(409, code, message);
+
+/** Opponents of a single player, when the request does not say how many. */
+const SINGLEPLAYER_BOTS = 3;
+/** Eight characters easy to read aloud and to type: no 0/O, no 1/I. */
+const newInviteCode = () => {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  return [...randomBytes(8)].map((byte) => alphabet[byte % alphabet.length]).join("");
+};
 
 /** The rules of a match, as stored in full when it was created. */
 export const rulesOf = (match: Pick<Match, "config">): MatchRules =>
@@ -40,6 +49,9 @@ const summarySelect = {
   id: true,
   name: true,
   status: true,
+  mode: true,
+  pace: true,
+  visibility: true,
   startAt: true,
   maxDays: true,
   maxPlayers: true,
@@ -65,6 +77,9 @@ function summary(row: SummaryRow, viewer: Viewer) {
     id: row.id,
     name: row.name,
     status: row.status,
+    mode: row.mode,
+    pace: row.pace,
+    visibility: row.visibility,
     startAt: row.startAt,
     maxDays: row.maxDays,
     maxPlayers: row.maxPlayers,
@@ -112,10 +127,13 @@ export class MatchService {
 
   // ---------- Reading ----------
 
-  /** A draft exists only for its owner. */
+  /**
+   * A single-player match exists only for its owner. A private one is not in the
+   * lists, but whoever has its address can look at it: the code is what lets in.
+   */
   private async visible(id: string, viewer: Viewer): Promise<SummaryRow> {
     const row = await this.prisma.match.findUnique({ where: { id }, select: summarySelect });
-    if (!row || (row.status === "DRAFT" && row.ownerId !== viewer?.user.id)) {
+    if (!row || (row.mode === "SINGLEPLAYER" && row.ownerId !== viewer?.user.id)) {
       throw notFound("Match");
     }
     return row;
@@ -131,7 +149,10 @@ export class MatchService {
     return summary(await this.visible(id, viewer), viewer);
   }
 
-  /** Matches open for registration or being played, soonest first. */
+  /**
+   * The public matches, and the private ones the viewer owns or plays: those
+   * planned or ongoing, soonest first, or the finished ones, latest first.
+   */
   async list(query: z.infer<typeof listMatchesQuery>, viewer: Viewer) {
     const players = Prisma.sql`(SELECT count(*) FROM "Empire" e WHERE e."matchId" = m.id)`;
     const size = {
@@ -140,14 +161,20 @@ export class MatchService {
       m: Prisma.sql`${players} BETWEEN 21 AND 50`,
       l: Prisma.sql`${players} > 50`,
     };
-    const where = Prisma.sql`m.status IN ('OPEN', 'RUNNING')
+    const viewerId = viewer?.user.id ?? "";
+    const finished = query.status === "finished";
+    const where = Prisma.sql`${finished ? Prisma.sql`m.status = 'FINISHED'` : Prisma.sql`m.status IN ('PLANNED', 'ONGOING')`}
+      AND (
+        m.visibility = 'PUBLIC' OR m."ownerId" = ${viewerId}
+        OR EXISTS (SELECT 1 FROM "Empire" e WHERE e."matchId" = m.id AND e."userId" = ${viewerId})
+      )
       ${query.name ? Prisma.sql`AND m.name ILIKE ${"%" + query.name.replace(/[%_\\]/g, "\\$&") + "%"}` : Prisma.empty}
       ${query.size ? Prisma.sql`AND ${size[query.size]}` : Prisma.empty}`;
 
     const [ids, totals] = await Promise.all([
       this.prisma.$queryRaw<{ id: string }[]>`
         SELECT m.id FROM "Match" m WHERE ${where}
-        ORDER BY (m.status = 'OPEN') DESC, m."startAt", m.id
+        ORDER BY ${finished ? Prisma.sql`m."finishedAt" DESC NULLS LAST` : Prisma.sql`(m.status = 'PLANNED') DESC, m."startAt"`}, m.id
         LIMIT ${query.pageSize} OFFSET ${(query.page - 1) * query.pageSize}`,
       this.prisma.$queryRaw<{ total: number }[]>`
         SELECT count(*)::int AS total FROM "Match" m WHERE ${where}`,
@@ -168,7 +195,7 @@ export class MatchService {
     };
   }
 
-  /** The viewer's own matches: the ones they own (drafts included) and the ones they play. */
+  /** The viewer's own matches still to be played: the ones they own and the ones they play. */
   async mine(viewer: AuthContext) {
     const rows = await this.prisma.match.findMany({
       where: {
@@ -188,71 +215,132 @@ export class MatchService {
     if (found !== new Set(areaIds).size) throw notFound("Folder");
   }
 
+  /**
+   * Creates a match, planned and open to players at once: one game territory
+   * per municipality of the chosen areas, each with its hidden starting
+   * resources. With a date it starts then; without, as soon as its first player
+   * has chosen a capital.
+   */
   async create(body: z.infer<typeof createMatchBody>, viewer: AuthContext) {
     await this.assertAreas(body.areaIds);
-    const match = await this.prisma.match.create({
-      data: {
-        name: body.name,
-        ownerId: viewer.user.id,
-        startAt: body.startAt,
-        maxDays: body.maxDays,
-        maxPlayers: body.maxPlayers,
-        turnHours: body.turnHours,
-        inviteCode: body.inviteCode,
-        // Stored in full, so changing a default never alters this match.
-        config: resolveMatchRules(body.config),
-        areas: { create: [...new Set(body.areaIds)].map((areaId) => ({ areaId })) },
+    const areaIds = [...new Set(body.areaIds)];
+    const single = body.mode === "SINGLEPLAYER";
+    const now = this.now();
+    if (body.startAt && body.startAt <= now) {
+      throw conflict("START_IN_PAST", "The start must be in the future");
+    }
+    // Alone means against bots: some from the first turn, and room for them.
+    const rules = resolveMatchRules(
+      single
+        ? {
+            ...body.config,
+            botsEnabled: true,
+            botsAtStart: Math.max(1, body.config.botsAtStart ?? SINGLEPLAYER_BOTS),
+            botsMax: Math.max(
+              body.config.botsMax ?? 0,
+              body.config.botsAtStart ?? SINGLEPLAYER_BOTS,
+              1,
+            ),
+            minPlayersToStart: 1,
+          }
+        : body.config,
+    );
+    const visibility = single ? "PRIVATE" : body.visibility;
+    const units = await this.prisma.$queryRaw<{ id: number; name: string }[]>(
+      unitsOfAreas(areaIds),
+    );
+    if (units.length < 2) throw conflict("NO_UNITS", "The chosen areas have no municipalities");
+
+    const id = await this.prisma.$transaction(
+      async (tx) => {
+        const match = await tx.match.create({
+          data: {
+            name: body.name,
+            ownerId: viewer.user.id,
+            mode: body.mode,
+            pace: body.pace,
+            visibility,
+            // Without a date the match waits for its first player: see `join`.
+            startAt: body.startAt ?? now,
+            maxDays: body.maxDays,
+            maxPlayers: single ? Math.max(2, rules.botsMax + 1) : body.maxPlayers,
+            turnHours: body.pace === "RUSH" ? RUSH_TURN_SECONDS / 3600 : body.turnHours,
+            // The code is what lets into a private match: one is made up if none was given.
+            // Nobody else enters a single-player match, so it needs none.
+            inviteCode:
+              single || visibility === "PUBLIC" ? null : (body.inviteCode ?? newInviteCode()),
+            // Stored in full, so changing a default never alters this match.
+            config: rules,
+            areas: { create: areaIds.map((areaId) => ({ areaId })) },
+          },
+          select: { id: true },
+        });
+        const territories = units.map((unit) => ({
+          id: randomUUID(),
+          matchId: match.id,
+          name: unit.name,
+          // Drawn here, on the server, and never sent to a client before the
+          // municipality is acquired.
+          resources: drawHiddenResources(rules, this.random),
+          geoUnitId: unit.id,
+        }));
+        const chunk = 2000;
+        for (let start = 0; start < territories.length; start += chunk) {
+          const slice = territories.slice(start, start + chunk);
+          await tx.territory.createMany({
+            data: slice.map(({ geoUnitId: _geoUnitId, ...territory }) => territory),
+          });
+          await tx.territoryUnit.createMany({
+            data: slice.map((territory) => ({
+              matchId: match.id,
+              territoryId: territory.id,
+              geoUnitId: territory.geoUnitId,
+            })),
+          });
+        }
+        await recordEvent(tx, match.id, 0, { type: "MATCH_OPENED" });
+        if (body.startAt) await this.scheduleStart(tx, match.id, body.startAt);
+        return match.id;
       },
-      select: { id: true },
-    });
-    return this.get(match.id, viewer);
+      { timeout: 60_000 },
+    );
+    this.onChange(id, "match");
+    return this.get(id, viewer);
   }
 
+  /** Before the start the owner may still change a few things: see PLANNED_EDITABLE. */
   async update(id: string, body: z.infer<typeof updateMatchBody>, viewer: AuthContext) {
     const match = await this.owned(id, viewer);
-    if (match.status !== "DRAFT" && match.status !== "OPEN") {
+    if (match.status !== "PLANNED") {
       throw conflict("MATCH_LOCKED", "A started match cannot be changed");
     }
-    if (match.status === "OPEN") {
-      // Players enrolled under these rules and on this map: only the rest may change.
-      const locked = Object.keys(body).filter(
-        (key) => !(OPEN_EDITABLE as readonly string[]).includes(key),
-      );
-      if (locked.length > 0) {
-        throw conflict(
-          "MATCH_LOCKED",
-          `Cannot change ${locked.join(", ")} once registrations are open`,
-        );
-      }
-      if (body.maxPlayers !== undefined && body.maxPlayers < match._count.empires) {
-        throw conflict("TOO_FEW_SEATS", "There are already more players than that");
-      }
-      if (body.startAt && body.startAt <= this.now()) {
-        throw conflict("START_IN_PAST", "The start must be in the future");
-      }
+    const locked = Object.keys(body).filter(
+      (key) => !(PLANNED_EDITABLE as readonly string[]).includes(key),
+    );
+    if (locked.length > 0) {
+      throw conflict("MATCH_LOCKED", `Cannot change ${locked.join(", ")} after the creation`);
     }
-    if (body.areaIds) await this.assertAreas(body.areaIds);
+    if (body.maxPlayers !== undefined && body.maxPlayers < match._count.empires) {
+      throw conflict("TOO_FEW_SEATS", "There are already more players than that");
+    }
+    if (body.startAt && body.startAt <= this.now()) {
+      throw conflict("START_IN_PAST", "The start must be in the future");
+    }
+    // A public match has no code, and a private one cannot be left without.
+    if (
+      body.inviteCode !== undefined &&
+      (body.inviteCode === null) !== (match.inviteCode === null)
+    ) {
+      throw conflict("MATCH_LOCKED", "The visibility of a match cannot be changed");
+    }
 
     await this.prisma.$transaction(async (tx) => {
-      const { areaIds, config, ...fields } = body;
-      await tx.match.update({
-        where: { id },
-        data: {
-          ...fields,
-          ...(config ? { config: resolveMatchRules({ ...rulesOf(match), ...config }) } : {}),
-          ...(areaIds
-            ? {
-                areas: {
-                  deleteMany: {},
-                  create: [...new Set(areaIds)].map((areaId) => ({ areaId })),
-                },
-              }
-            : {}),
-        },
-      });
+      const { areaIds: _areaIds, config: _config, ...fields } = body;
+      await tx.match.update({ where: { id }, data: fields });
       // A new date needs its own start job; the old one finds the date moved and does nothing.
-      if (match.status === "OPEN" && body.startAt) await this.scheduleStart(tx, id, body.startAt);
+      if (body.startAt) await this.scheduleStart(tx, id, body.startAt);
     });
+    this.onChange(id, "match");
     return this.get(id, viewer);
   }
 
@@ -265,68 +353,16 @@ export class MatchService {
     );
   }
 
-  /**
-   * Opens registrations: creates one game territory per municipality of the
-   * chosen areas, each with its hidden starting resources, and schedules the start.
-   */
-  async open(id: string, viewer: AuthContext) {
-    const match = await this.owned(id, viewer);
-    if (match.status !== "DRAFT") throw conflict("NOT_A_DRAFT", "Registrations are already open");
-    if (match.startAt <= this.now()) {
-      throw conflict("START_IN_PAST", "The start must be in the future");
-    }
-    const rules = rulesOf(match);
-    const units = await this.prisma.$queryRaw<{ id: number; name: string }[]>(
-      unitsOfAreas(match.areas.map((entry) => entry.area.id)),
-    );
-    if (units.length < 2) throw conflict("NO_UNITS", "The chosen areas have no municipalities");
-
-    const territories = units.map((unit) => ({
-      id: randomUUID(),
-      matchId: id,
-      name: unit.name,
-      // Drawn here, on the server, and never sent to a client before the
-      // municipality is acquired.
-      resources: drawHiddenResources(rules, this.random),
-      geoUnitId: unit.id,
-    }));
-
-    await this.prisma.$transaction(
-      async (tx) => {
-        // Only one request can open the match.
-        const { count } = await tx.match.updateMany({
-          where: { id, status: "DRAFT" },
-          data: { status: "OPEN" },
-        });
-        if (count === 0) throw conflict("NOT_A_DRAFT", "Registrations are already open");
-
-        const chunk = 2000;
-        for (let start = 0; start < territories.length; start += chunk) {
-          const slice = territories.slice(start, start + chunk);
-          await tx.territory.createMany({
-            data: slice.map(({ geoUnitId: _geoUnitId, ...territory }) => territory),
-          });
-          await tx.territoryUnit.createMany({
-            data: slice.map((territory) => ({
-              matchId: id,
-              territoryId: territory.id,
-              geoUnitId: territory.geoUnitId,
-            })),
-          });
-        }
-        await recordEvent(tx, id, 0, { type: "MATCH_OPENED" });
-        await this.scheduleStart(tx, id, match.startAt);
-      },
-      { timeout: 60_000 },
-    );
-    this.onChange(id, "match");
-    return this.get(id, viewer);
-  }
-
-  /** Only a draft can be deleted: nobody else has seen it. */
+  /** A match can be deleted while it is planned and nobody else is in it. */
   async remove(id: string, viewer: AuthContext) {
     const match = await this.owned(id, viewer);
-    if (match.status !== "DRAFT") throw conflict("NOT_A_DRAFT", "Only a draft can be deleted");
+    if (match.status !== "PLANNED") {
+      throw conflict("MATCH_LOCKED", "A started match cannot be deleted");
+    }
+    const others = await this.prisma.empire.count({
+      where: { matchId: id, userId: { not: viewer.user.id } },
+    });
+    if (others > 0) throw conflict("HAS_PLAYERS", "Other players are already in this match");
     await this.prisma.match.delete({ where: { id } });
   }
 
@@ -364,7 +400,7 @@ export class MatchService {
       const rows = await tx.$queryRaw<Match[]>`SELECT * FROM "Match" WHERE id = ${id} FOR UPDATE`;
       const match = rows[0];
       if (!match) throw notFound("Match");
-      if (match.status !== "OPEN") {
+      if (match.status !== "PLANNED") {
         throw conflict("MATCH_STARTED", "You can withdraw only before the match starts");
       }
       const empire = await tx.empire.findFirst({ where: { matchId: id, userId: viewer.user.id } });
@@ -421,9 +457,12 @@ export class MatchService {
       const rules = rulesOf(match);
 
       const open =
-        match.status === "OPEN" ||
-        (match.status === "RUNNING" && (rules.lateJoin || options.asBot === true));
+        match.status === "PLANNED" ||
+        (match.status === "ONGOING" && (rules.lateJoin || options.asBot === true));
       if (!open) throw conflict("REGISTRATION_CLOSED", "This match does not accept players");
+      if (!options.asBot && match.mode === "SINGLEPLAYER" && match.ownerId !== viewer.user.id) {
+        throw new AppError(403, "SINGLEPLAYER", "This match is played alone");
+      }
       if (!options.asBot && match.inviteCode !== null && body.inviteCode !== match.inviteCode) {
         throw new AppError(403, "INVITE_CODE_REQUIRED", "Wrong or missing invite code");
       }
@@ -469,6 +508,18 @@ export class MatchService {
         territoryId: territory.id,
         data: { empireName: empire.name, territoryName: territory.name },
       });
+
+      // A match whose time has come was only waiting for players: created to start
+      // at once, or planned for a date that found too few. It starts now, and its
+      // turns are counted from now.
+      if (match.status === "PLANNED" && match.startAt <= this.now()) {
+        const players = await tx.empire.count({ where: { matchId: id, status: "ACTIVE" } });
+        if (players >= rules.minPlayersToStart) {
+          const startAt = this.now();
+          await tx.match.update({ where: { id }, data: { startAt } });
+          await this.scheduleStart(tx, id, startAt);
+        }
+      }
     });
     this.onChange(id, "empires");
     return this.state(id, viewer);
@@ -479,10 +530,10 @@ export class MatchService {
     await this.prisma.$transaction(async (tx) => {
       const rows = await tx.$queryRaw<Match[]>`SELECT * FROM "Match" WHERE id = ${id} FOR UPDATE`;
       const match = rows[0];
-      if (!match || match.status === "DRAFT") throw notFound("Match");
+      if (!match) throw notFound("Match");
       const empire = await tx.empire.findFirst({ where: { matchId: id, userId: viewer.user.id } });
       if (!empire) throw notFound("Empire");
-      if (match.status !== "OPEN") {
+      if (match.status !== "PLANNED") {
         throw conflict("MATCH_STARTED", "The empire cannot be changed after the start");
       }
       await this.assertIdentityFree(tx, id, body, empire.id);
@@ -696,7 +747,7 @@ export class MatchService {
 
   async state(id: string, viewer: Viewer) {
     const data = await this.loadShared(id);
-    if (!data || (data.match.status === "DRAFT" && data.match.ownerId !== viewer?.user.id)) {
+    if (!data || (data.match.mode === "SINGLEPLAYER" && data.match.ownerId !== viewer?.user.id)) {
       throw notFound("Match");
     }
     const { match, empires, territories, territoryNames, structures, alliances } = data;

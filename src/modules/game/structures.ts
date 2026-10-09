@@ -60,7 +60,7 @@ export class StructureService {
    */
   async catalogue(matchId: string, viewer: AuthContext) {
     const match = await this.prisma.match.findUnique({ where: { id: matchId } });
-    if (!match || match.status === "DRAFT") throw notFound("Match");
+    if (!match) throw notFound("Match");
     const empire = await this.prisma.empire.findFirst({
       where: { matchId, userId: viewer.user.id, status: "ACTIVE" },
     });

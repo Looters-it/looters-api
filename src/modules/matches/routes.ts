@@ -79,9 +79,6 @@ export function registerMatchRoutes(app: FastifyInstance, deps: MatchRoutesDeps)
     await matches.remove(matchParams.parse(request.params).id, auth);
     return reply.code(204).send();
   });
-  app.post("/api/matches/:id/open", async (request) =>
-    matches.open(matchParams.parse(request.params).id, await guard.user(request)),
-  );
 
   app.get("/api/matches/:id/state", async (request) =>
     matches.state(matchParams.parse(request.params).id, await guard.optional(request)),
@@ -150,7 +147,7 @@ export function registerMatchRoutes(app: FastifyInstance, deps: MatchRoutesDeps)
   const previews = new Map<string, { at: number; body: Promise<MatchPreview> }>();
   app.get("/api/matches/:id/preview", async (request, reply) => {
     const { id } = matchParams.parse(request.params);
-    await matches.get(id, await guard.optional(request));
+    const match = await matches.get(id, await guard.optional(request));
     const kept = previews.get(id);
     const fresh = kept && Date.now() - kept.at < PREVIEW_TTL_MS;
     const body = fresh ? kept.body : matchPreview(prisma, id);
@@ -159,7 +156,9 @@ export function registerMatchRoutes(app: FastifyInstance, deps: MatchRoutesDeps)
       previews.set(id, { at: Date.now(), body });
       body.catch(() => previews.delete(id));
     }
-    return reply.header("cache-control", "public, max-age=30").send(await body);
+    // What is not for everyone is not for a shared cache either.
+    const audience = match.visibility === "PUBLIC" ? "public" : "private";
+    return reply.header("cache-control", `${audience}, max-age=30`).send(await body);
   });
 
   app.get("/api/matches/:id/map", async (request) => {

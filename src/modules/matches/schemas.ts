@@ -8,18 +8,30 @@ const name = z.string().trim().min(3).max(60);
 const startAt = z.coerce.date();
 const maxDays = z.number().int().min(1).max(3650).nullable();
 const maxPlayers = z.number().int().min(2).max(MAX_PLAYERS_LIMIT);
-// A fraction of an hour is allowed, to play fast test matches.
+/** How long a turn of a rush match lasts. */
+export const RUSH_TURN_SECONDS = 30;
+// From thirty seconds up: a normal match may be as fast as a rush one.
 const turnHours = z
   .number()
-  .min(0.01)
+  .min(RUSH_TURN_SECONDS / 3600)
   .max(24 * 30);
+const mode = z.enum(["SINGLEPLAYER", "MULTIPLAYER"]);
+const pace = z.enum(["RUSH", "NORMAL"]);
+const visibility = z.enum(["PUBLIC", "PRIVATE"]);
 const inviteCode = z.string().trim().min(4).max(32).nullable();
 const areaIds = z.array(z.string().min(1)).min(1).max(50);
 
 export const createMatchBody = z.strictObject({
   name,
   areaIds,
-  startAt,
+  /** Alone against bots, or with people online. */
+  mode: mode.default("MULTIPLAYER"),
+  /** Rush fixes the turn at thirty seconds; normal takes `turnHours`. */
+  pace: pace.default("NORMAL"),
+  /** A single-player match is always private. */
+  visibility: visibility.default("PUBLIC"),
+  /** When the match starts. Without it, as soon as its first player has chosen a capital. */
+  startAt: startAt.nullable().default(null),
   maxDays: maxDays.default(null),
   maxPlayers: maxPlayers.default(100),
   turnHours: turnHours.default(24),
@@ -39,10 +51,15 @@ export const updateMatchBody = z.strictObject({
   config: matchRulesOverrides.optional(),
 });
 
-/** What the owner may still change once registrations are open. */
-export const OPEN_EDITABLE = ["name", "startAt", "maxDays", "maxPlayers", "inviteCode"] as const;
+/**
+ * What the owner may still change before the start. Players may already be in,
+ * under these rules and on this map: the rest is fixed when the match is created.
+ */
+export const PLANNED_EDITABLE = ["name", "startAt", "maxDays", "maxPlayers", "inviteCode"] as const;
 
 export const listMatchesQuery = z.object({
+  // Planned and ongoing matches, or the finished ones.
+  status: z.enum(["active", "finished"]).default("active"),
   name: z.string().trim().max(60).optional(),
   // Players enrolled: with free seats, up to 20, 21 to 50, more than 50.
   size: z.enum(["free", "s", "m", "l"]).optional(),

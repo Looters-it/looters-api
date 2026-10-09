@@ -151,12 +151,8 @@ describe.skipIf(!url)("matches", () => {
     expect(response.statusCode, response.body).toBe(201);
     return response.json<{ id: string }>().id;
   }
-  async function openMatch(overrides: object = {}) {
-    const id = await draft(overrides);
-    const response = await as("anna", "POST", `/api/matches/${id}/open`);
-    expect(response.statusCode, response.body).toBe(200);
-    return id;
-  }
+  // A match is planned and open to players as soon as it is created.
+  const openMatch = draft;
   const join = (user: string, id: string, unit: number, body: object) =>
     as(user, "POST", `/api/matches/${id}/join`, { geoUnitId: unit, ...body });
 
@@ -166,13 +162,16 @@ describe.skipIf(!url)("matches", () => {
       expect(response.statusCode).toBe(401);
     });
 
-    it("creates a draft with the defaults and stores every rule", async () => {
+    it("creates a planned match with the defaults and stores every rule", async () => {
       const id = await draft({ config: { annexCost: 80 } });
       const match = (await as("anna", "GET", `/api/matches/${id}`)).json<{
         config: Record<string, unknown>;
       }>();
       expect(match).toMatchObject({
-        status: "DRAFT",
+        status: "PLANNED",
+        mode: "MULTIPLAYER",
+        pace: "NORMAL",
+        visibility: "PUBLIC",
         maxPlayers: 100,
         turnHours: 24,
         maxDays: null,
@@ -182,8 +181,6 @@ describe.skipIf(!url)("matches", () => {
         hasInviteCode: false,
       });
       expect(match.config).toEqual({ ...DEFAULT_MATCH_RULES, annexCost: 80 });
-      // Nothing is created for a draft: no territories yet.
-      expect(await prisma.territory.count()).toBe(0);
     });
 
     it("validates the settings", async () => {
@@ -206,34 +203,136 @@ describe.skipIf(!url)("matches", () => {
       expect(unknownArea.statusCode).toBe(404);
     });
 
-    it("keeps a draft invisible to everyone but its owner", async () => {
+    it("shows a public match to everyone as soon as it is created", async () => {
       const id = await draft();
-      expect((await as("bruno", "GET", `/api/matches/${id}`)).statusCode).toBe(404);
-      expect((await as(null, "GET", `/api/matches/${id}/state`)).statusCode).toBe(404);
-      expect((await as(null, "GET", "/api/matches")).json()).toMatchObject({ total: 0 });
+      expect((await as("bruno", "GET", `/api/matches/${id}`)).json()).toMatchObject({
+        owner: "anna",
+        isOwner: false,
+      });
+      expect((await as(null, "GET", `/api/matches/${id}/state`)).statusCode).toBe(200);
+      expect((await as(null, "GET", "/api/matches")).json()).toMatchObject({ total: 1 });
       expect((await as("anna", "GET", "/api/matches/mine")).json<unknown[]>()).toHaveLength(1);
     });
 
-    it("lets only the owner change or delete a draft", async () => {
+    it("lets only the owner delete a match, while nobody else is in it", async () => {
       const id = await draft();
-      expect((await as("bruno", "PATCH", `/api/matches/${id}`, { name: "Mia" })).statusCode).toBe(
-        404,
-      );
-      const changed = await as("anna", "PATCH", `/api/matches/${id}`, {
-        name: "Rinominata",
-        turnHours: 12,
-        config: { incomeBase: 70 },
+      expect((await as("bruno", "DELETE", `/api/matches/${id}`)).statusCode).toBe(403);
+      await join("bruno", id, unitIds[0] ?? 0, { empire: empire("Ospite") });
+      expect((await as("anna", "DELETE", `/api/matches/${id}`)).json()).toMatchObject({
+        error: { code: "HAS_PLAYERS" },
       });
-      expect(changed.json()).toMatchObject({ name: "Rinominata", turnHours: 12 });
-      expect(
-        changed.json<{ config: { incomeBase: number; annexCost: number } }>().config,
-      ).toMatchObject({ incomeBase: 70, annexCost: 50 });
+      await as("bruno", "DELETE", `/api/matches/${id}/empire`);
       expect((await as("anna", "DELETE", `/api/matches/${id}`)).statusCode).toBe(204);
       expect(await prisma.match.count()).toBe(0);
+      expect(await prisma.territory.count()).toBe(0);
     });
   });
 
-  describe("opening registrations", () => {
+  describe("game modes", () => {
+    const summary = async (user: string | null, id: string) =>
+      as(user, "GET", `/api/matches/${id}`);
+
+    it("plays a single-player match alone, in private, against bots from the start", async () => {
+      const id = await draft({ mode: "SINGLEPLAYER", visibility: "PUBLIC", startAt: null });
+      const match = (await summary("anna", id)).json<{ config: Record<string, unknown> }>();
+      expect(match).toMatchObject({ mode: "SINGLEPLAYER", visibility: "PRIVATE", maxPlayers: 4 });
+      expect(match.config).toMatchObject({ botsEnabled: true, botsAtStart: 3, botsMax: 3 });
+      // Nobody else sees it, lists it or enters it.
+      expect((await summary("bruno", id)).statusCode).toBe(404);
+      expect((await as("bruno", "GET", `/api/matches/${id}/state`)).statusCode).toBe(404);
+      expect((await as("bruno", "GET", "/api/matches")).json()).toMatchObject({ total: 0 });
+      expect((await as("anna", "GET", "/api/matches")).json()).toMatchObject({ total: 1 });
+      const refused = await join("bruno", id, unitIds[0] ?? 0, { empire: empire("Intruso") });
+      expect(refused.statusCode).toBe(404);
+    });
+
+    it("takes the number of opponents of a single player from the request", async () => {
+      const id = await draft({ mode: "SINGLEPLAYER", config: { botsAtStart: 5 } });
+      const match = (await summary("anna", id)).json<{ config: Record<string, unknown> }>();
+      expect(match).toMatchObject({ maxPlayers: 6 });
+      expect(match.config).toMatchObject({ botsAtStart: 5, botsMax: 5 });
+    });
+
+    it("fixes the turn of a rush match at thirty seconds", async () => {
+      const rush = await draft({ pace: "RUSH", turnHours: 12 });
+      expect((await summary("anna", rush)).json()).toMatchObject({
+        pace: "RUSH",
+        turnHours: 30 / 3600,
+      });
+      // A normal match may be as fast, and no faster.
+      const fast = await draft({ turnHours: 30 / 3600 });
+      expect((await summary("anna", fast)).json()).toMatchObject({ pace: "NORMAL" });
+      const tooFast = await as("anna", "POST", "/api/matches", {
+        name: "Troppo svelta",
+        areaIds: [areaId],
+        turnHours: 10 / 3600,
+      });
+      expect(tooFast.statusCode).toBe(400);
+    });
+
+    it("keeps a private match out of the lists and makes up its invite code", async () => {
+      const id = await draft({ visibility: "PRIVATE" });
+      const mine = (await summary("anna", id)).json<{ inviteCode: string }>();
+      expect(mine).toMatchObject({ visibility: "PRIVATE", hasInviteCode: true });
+      expect(mine.inviteCode).toMatch(/^[A-Z2-9]{8}$/);
+      expect((await as("bruno", "GET", "/api/matches")).json()).toMatchObject({ total: 0 });
+      expect((await as("anna", "GET", "/api/matches")).json()).toMatchObject({ total: 1 });
+      // Whoever has the address can look at it; the code is what lets in.
+      expect((await summary("bruno", id)).statusCode).toBe(200);
+      const noCode = await join("bruno", id, unitIds[0] ?? 0, { empire: empire("Senza") });
+      expect(noCode.json()).toMatchObject({ error: { code: "INVITE_CODE_REQUIRED" } });
+      const withCode = await join("bruno", id, unitIds[0] ?? 0, {
+        empire: empire("Con"),
+        inviteCode: mine.inviteCode,
+      });
+      expect(withCode.statusCode).toBe(201);
+      // Once in, it is among the matches the player sees.
+      expect((await as("bruno", "GET", "/api/matches")).json()).toMatchObject({ total: 1 });
+    });
+
+    it("starts a match without a date as soon as its first player has a capital", async () => {
+      const id = await draft({ startAt: null });
+      expect(await prisma.job.count({ where: { type: "match.start" } })).toBe(0);
+      const before = Date.now();
+      await join("anna", id, unitIds[0] ?? 0, { empire: empire("Prima") });
+      const jobs = await prisma.job.findMany({ where: { type: "match.start" } });
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]).toMatchObject({ payload: { matchId: id } });
+      // The turns are counted from the moment it could start, not from its creation.
+      const match = await prisma.match.findUniqueOrThrow({ where: { id } });
+      expect(match.startAt.getTime()).toBeGreaterThanOrEqual(before);
+      expect(jobs[0]?.runAt.getTime()).toBe(match.startAt.getTime());
+    });
+
+    it("waits for its date when a match is planned for later", async () => {
+      const id = await draft();
+      await join("anna", id, unitIds[0] ?? 0, { empire: empire("Prima") });
+      expect(await prisma.job.count({ where: { type: "match.start" } })).toBe(1);
+      expect((await summary("anna", id)).json()).toMatchObject({ status: "PLANNED", players: 1 });
+    });
+
+    it("lists finished matches apart, latest first", async () => {
+      const first = await draft({ name: "Vecchia" });
+      const second = await draft({ name: "Recente" });
+      await draft({ name: "In corso" });
+      await prisma.match.update({
+        where: { id: first },
+        data: { status: "FINISHED", finishedAt: new Date(Date.now() - 86_400_000) },
+      });
+      await prisma.match.update({
+        where: { id: second },
+        data: { status: "FINISHED", finishedAt: new Date() },
+      });
+      const names = async (query: string) =>
+        (await as(null, "GET", `/api/matches?${query}`))
+          .json<{ matches: { name: string }[] }>()
+          .matches.map((match) => match.name);
+      expect(await names("")).toEqual(["In corso"]);
+      expect(await names("status=finished")).toEqual(["Recente", "Vecchia"]);
+    });
+  });
+
+  describe("a planned match", () => {
     it("creates a territory per municipality with hidden resources and schedules the start", async () => {
       const startAt = tomorrow();
       const id = await openMatch({ startAt });
@@ -253,6 +352,9 @@ describe.skipIf(!url)("matches", () => {
       expect(jobs).toHaveLength(1);
       expect(jobs[0]).toMatchObject({ payload: { matchId: id } });
       expect(jobs[0]?.runAt.toISOString()).toBe(startAt);
+      expect(await prisma.gameEvent.count({ where: { matchId: id, type: "MATCH_OPENED" } })).toBe(
+        1,
+      );
     });
 
     it("never sends the hidden resources of free municipalities to anyone", async () => {
@@ -264,17 +366,17 @@ describe.skipIf(!url)("matches", () => {
       }
     });
 
-    it("refuses a start in the past and a second opening", async () => {
-      const past = await draft({ startAt: new Date(Date.now() - 1000).toISOString() });
-      const response = await as("anna", "POST", `/api/matches/${past}/open`);
+    it("refuses a start in the past", async () => {
+      const response = await as("anna", "POST", "/api/matches", {
+        name: "Ieri",
+        areaIds: [areaId],
+        startAt: new Date(Date.now() - 1000).toISOString(),
+      });
       expect(response.json()).toMatchObject({ error: { code: "START_IN_PAST" } });
-
-      const id = await openMatch();
-      expect((await as("anna", "POST", `/api/matches/${id}/open`)).statusCode).toBe(409);
-      expect(await prisma.territory.count({ where: { matchId: id } })).toBe(6);
+      expect(await prisma.match.count()).toBe(0);
     });
 
-    it("locks rules and map once open, but lets the date move and reschedules the start", async () => {
+    it("locks rules and map once created, but lets the date move and reschedules the start", async () => {
       const id = await openMatch();
       for (const body of [{ config: { annexCost: 1 } }, { areaIds: [areaId] }, { turnHours: 1 }]) {
         const response = await as("anna", "PATCH", `/api/matches/${id}`, body);
@@ -288,7 +390,6 @@ describe.skipIf(!url)("matches", () => {
         orderBy: { runAt: "asc" },
       });
       expect(jobs.map((job) => job.runAt.toISOString()).at(-1)).toBe(later);
-      expect((await as("anna", "DELETE", `/api/matches/${id}`)).statusCode).toBe(409);
     });
 
     it("lists open matches with filters and pages", async () => {
@@ -437,7 +538,7 @@ describe.skipIf(!url)("matches", () => {
     });
 
     it("asks for the invite code when the match has one, and shows it only to the owner", async () => {
-      const id = await openMatch({ inviteCode: "segreto" });
+      const id = await openMatch({ visibility: "PRIVATE", inviteCode: "segreto" });
       expect((await as("anna", "GET", `/api/matches/${id}`)).json()).toMatchObject({
         inviteCode: "segreto",
       });
@@ -459,14 +560,14 @@ describe.skipIf(!url)("matches", () => {
       expect(right.statusCode).toBe(201);
     });
 
-    it("refuses guests, drafts and municipalities outside the match", async () => {
+    it("refuses guests, matches played alone by others and municipalities outside the match", async () => {
       const id = await openMatch();
       expect((await join("", id, unitIds[0] ?? 0, { empire: empire("Nessuno") })).statusCode).toBe(
         401,
       );
       const outside = await join("anna", id, 999_999, { empire: empire("Anna") });
       expect(outside.statusCode).toBe(404);
-      const hidden = await draft();
+      const hidden = await draft({ mode: "SINGLEPLAYER" });
       expect(
         (await join("bruno", hidden, unitIds[0] ?? 0, { empire: empire("Bruno") })).statusCode,
       ).toBe(404);
@@ -514,7 +615,7 @@ describe.skipIf(!url)("matches", () => {
       expect(image.rawPayload.equals(png)).toBe(true);
 
       // It can change during the match, and its address changes with it.
-      await prisma.match.update({ where: { id }, data: { status: "RUNNING", currentTurn: 1 } });
+      await prisma.match.update({ where: { id }, data: { status: "ONGOING", currentTurn: 1 } });
       await new Promise((resolve) => setTimeout(resolve, 5));
       const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 9, 9, 9]);
       const changed = await put("anna", jpeg, "image/jpeg");
@@ -579,7 +680,7 @@ describe.skipIf(!url)("matches", () => {
       ).toBe(201);
 
       // Once the match runs, nobody walks away.
-      await prisma.match.update({ where: { id }, data: { status: "RUNNING", currentTurn: 1 } });
+      await prisma.match.update({ where: { id }, data: { status: "ONGOING", currentTurn: 1 } });
       expect((await as("bruno", "DELETE", `/api/matches/${id}/empire`)).json()).toMatchObject({
         error: { code: "MATCH_STARTED" },
       });
@@ -610,7 +711,7 @@ describe.skipIf(!url)("matches", () => {
       );
       expect(taken.json()).toMatchObject({ error: { code: "EMPIRE_NAME_TAKEN" } });
 
-      await prisma.match.update({ where: { id }, data: { status: "RUNNING", currentTurn: 1 } });
+      await prisma.match.update({ where: { id }, data: { status: "ONGOING", currentTurn: 1 } });
       const late = await as(
         "anna",
         "PATCH",
@@ -624,7 +725,7 @@ describe.skipIf(!url)("matches", () => {
       const open = await openMatch();
       await prisma.match.update({
         where: { id: open },
-        data: { status: "RUNNING", currentTurn: 4 },
+        data: { status: "ONGOING", currentTurn: 4 },
       });
       const late = await join("bruno", open, unitIds[0] ?? 0, { empire: empire("Bruno") });
       expect(late.statusCode).toBe(201);
@@ -637,7 +738,7 @@ describe.skipIf(!url)("matches", () => {
       const closed = await openMatch({ config: { lateJoin: false } });
       await prisma.match.update({
         where: { id: closed },
-        data: { status: "RUNNING", currentTurn: 1 },
+        data: { status: "ONGOING", currentTurn: 1 },
       });
       const refused = await join("carla", closed, unitIds[0] ?? 0, { empire: empire("Carla") });
       expect(refused.json()).toMatchObject({ error: { code: "REGISTRATION_CLOSED" } });
@@ -665,12 +766,10 @@ describe.skipIf(!url)("matches", () => {
       expect(units).toHaveLength(6);
     });
 
-    it("has no map for a draft", async () => {
-      const id = await draft();
+    it("has no map of a match played alone by another", async () => {
+      const id = await draft({ mode: "SINGLEPLAYER" });
       expect((await as(null, "GET", `/api/matches/${id}/map`)).statusCode).toBe(404);
-      expect((await as(null, "GET", `/api/matches/${id}/tiles/9/268/183.mvt`)).statusCode).toBe(
-        404,
-      );
+      expect((await as("bruno", "GET", `/api/matches/${id}/preview`)).statusCode).toBe(404);
     });
   });
 

@@ -67,7 +67,7 @@ export class BotService {
 
   private async runningWithBots(matchId: string) {
     const match = await this.prisma.match.findUnique({ where: { id: matchId } });
-    if (match?.status !== "RUNNING") return null;
+    if (match?.status !== "ONGOING") return null;
     const rules = rulesOf(match);
     return rules.botsEnabled ? { match, rules } : null;
   }
@@ -82,13 +82,24 @@ export class BotService {
 
   /**
    * What happens when a turn of a match begins: perhaps a new bot founds an
-   * empire on a free municipality, then every bot plays its turn.
+   * empire on a free municipality, then every bot plays its turn. The bots that
+   * a match has from its start are founded on its first turn, all together.
    */
   async playTurn(matchId: string): Promise<void> {
     const running = await this.runningWithBots(matchId);
     if (!running) return;
     try {
-      await this.maybeSpawn(matchId);
+      const { match, rules } = running;
+      if (match.currentTurn === 1) {
+        const there = await this.prisma.empire.count({
+          where: { matchId, user: { isBot: true } },
+        });
+        for (let missing = rules.botsAtStart - there; missing > 0; missing--) {
+          if (!(await this.maybeSpawn(matchId, true))) break;
+        }
+      } else {
+        await this.maybeSpawn(matchId);
+      }
     } catch (error) {
       this.onError(error, { matchId });
     }

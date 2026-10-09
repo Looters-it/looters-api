@@ -73,7 +73,6 @@ describe.skipIf(!url)("capital, fall and end of the match", () => {
       startAt: new Date(Date.now() + 86_400_000).toISOString(),
     });
     matchId = created.json<{ id: string }>().id;
-    await as("anna", "POST", `/api/matches/${matchId}/open`);
     for (const [index, [user, start]] of (
       [
         ["anna", 0],
@@ -93,7 +92,7 @@ describe.skipIf(!url)("capital, fall and end of the match", () => {
     });
     await prisma.match.update({
       where: { id: matchId },
-      data: { status: "RUNNING", currentTurn: 5, turnEndsAt: new Date(Date.now() + 3_600_000) },
+      data: { status: "ONGOING", currentTurn: 5, turnEndsAt: new Date(Date.now() + 3_600_000) },
     });
   });
   afterEach(async () => {

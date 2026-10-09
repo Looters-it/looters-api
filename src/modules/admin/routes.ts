@@ -22,7 +22,7 @@ export function registerAdminRoutes(app: FastifyInstance, deps: AdminRoutesDeps)
     await guard.admin(request);
     const [users, matchesRunning] = await Promise.all([
       prisma.user.count({ where: { role: "USER", isBot: false } }),
-      prisma.match.count({ where: { status: "RUNNING" } }),
+      prisma.match.count({ where: { status: "ONGOING" } }),
     ]);
     return { users, matchesRunning, online: hub.onlineCount() };
   });

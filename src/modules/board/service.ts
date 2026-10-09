@@ -162,7 +162,7 @@ export class BoardService {
   async post(matchId: string, body: z.infer<typeof messageBody>, viewer: AuthContext) {
     const event = await this.prisma.$transaction(async (tx) => {
       const match = await tx.match.findUnique({ where: { id: matchId } });
-      if (!match || match.status === "DRAFT") throw notFound("Match");
+      if (!match) throw notFound("Match");
       if (match.status === "FINISHED") {
         throw new AppError(409, "MATCH_NOT_RUNNING", "The match is over");
       }
@@ -214,7 +214,7 @@ export class BoardService {
       where: { id: matchId },
       select: { ownerId: true, status: true },
     });
-    if (!match || match.status === "DRAFT") throw notFound("Match");
+    if (!match) throw notFound("Match");
     if (match.ownerId !== viewer.user.id && viewer.user.role !== "ADMIN") throw forbidden();
     // Automatic announcements are the record of what happened: they are not removed.
     const { count } = await this.prisma.gameEvent.updateMany({

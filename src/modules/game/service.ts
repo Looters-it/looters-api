@@ -96,7 +96,7 @@ export class GameService {
     const rules = match.config as MatchRules;
 
     let annex = null;
-    if (mine && match.status === "RUNNING" && territory.ownerEmpireId === null) {
+    if (mine && match.status === "ONGOING" && territory.ownerEmpireId === null) {
       // The player's territories that touch this one and could pay for it.
       const ids = [
         ...new Set(neighbours.filter((n) => n.ownerEmpireId === mine.id).map((n) => n.territoryId)),
@@ -125,7 +125,7 @@ export class GameService {
 
     // A player looking at an enemy territory: can it be attacked, and from where.
     let attack = null;
-    if (mine && match.status === "RUNNING" && territory.ownerEmpireId && !own && !ally) {
+    if (mine && match.status === "ONGOING" && territory.ownerEmpireId && !own && !ally) {
       const ids = [
         ...new Set(neighbours.filter((n) => n.ownerEmpireId === mine.id).map((n) => n.territoryId)),
       ];

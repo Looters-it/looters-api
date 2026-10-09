@@ -70,7 +70,6 @@ describe.skipIf(!url)("bots", () => {
       config: { botsEnabled: true, botsMax: 2, botSpawnChancePct: 100 },
     });
     matchId = created.json<{ id: string }>().id;
-    await as("POST", `/api/matches/${matchId}/open`);
     await as("POST", `/api/matches/${matchId}/join`, {
       geoUnitId: unit[0],
       empire: { name: "Anna", color: EMPIRE_COLORS[0], emblem: "torre", motto: null },
@@ -81,7 +80,7 @@ describe.skipIf(!url)("bots", () => {
     });
     await prisma.match.update({
       where: { id: matchId },
-      data: { status: "RUNNING", currentTurn: 5, turnEndsAt: new Date(Date.now() + 3_600_000) },
+      data: { status: "ONGOING", currentTurn: 5, turnEndsAt: new Date(Date.now() + 3_600_000) },
     });
   });
   afterEach(async () => {
@@ -100,6 +99,23 @@ describe.skipIf(!url)("bots", () => {
   it("needs one player only: a match starts with a single empire by default", () => {
     expect(DEFAULT_MATCH_RULES.minPlayersToStart).toBe(1);
     expect(DEFAULT_MATCH_RULES.botsEnabled).toBe(false);
+  });
+
+  it("founds the bots a match has from its start all together, on its first turn", async () => {
+    const match = await prisma.match.findUniqueOrThrow({ where: { id: matchId } });
+    await prisma.match.update({
+      where: { id: matchId },
+      // No chance of a bot by luck: only those owed at the start.
+      data: {
+        currentTurn: 1,
+        config: { ...(match.config as object), botsAtStart: 2, botSpawnChancePct: 0 },
+      },
+    });
+    await app.bots.playTurn(matchId);
+    expect(await bots()).toHaveLength(2);
+    // Played again, the first turn owes no more.
+    await app.bots.playTurn(matchId);
+    expect(await bots()).toHaveLength(2);
   });
 
   it("founds bot empires on free municipalities as turns begin, up to the limit of the match", async () => {

@@ -87,7 +87,6 @@ describe.skipIf(!url)("board", () => {
       config: { boardMessageIntervalSec: 0 },
     });
     matchId = created.json<{ id: string }>().id;
-    await as("anna", "POST", `/api/matches/${matchId}/open`);
     for (const [index, [user, start]] of (
       [
         ["anna", 0],
@@ -106,7 +105,7 @@ describe.skipIf(!url)("board", () => {
     }
     await prisma.match.update({
       where: { id: matchId },
-      data: { status: "RUNNING", currentTurn: 1, turnEndsAt: new Date(Date.now() + 3_600_000) },
+      data: { status: "ONGOING", currentTurn: 1, turnEndsAt: new Date(Date.now() + 3_600_000) },
     });
   });
   afterEach(async () => {
@@ -380,13 +379,13 @@ describe.skipIf(!url)("board", () => {
       for (const owner of Object.values(turn.ownership)) expect(typeof owner).toBe("string");
     });
 
-    it("answers 404 for the turn being played, a turn never played and a draft", async () => {
+    it("answers 404 for the turn being played, a turn never played and a match played alone by another", async () => {
       await closeTurn();
       const status = async (route: string) => (await as(null, "GET", route)).statusCode;
       expect(await status(`/api/matches/${matchId}/history/2`)).toBe(404);
       expect(await status(`/api/matches/${matchId}/history/99`)).toBe(404);
       expect(await status(`/api/matches/${matchId}/history/0`)).toBe(400);
-      await prisma.match.update({ where: { id: matchId }, data: { status: "DRAFT" } });
+      await prisma.match.update({ where: { id: matchId }, data: { mode: "SINGLEPLAYER" } });
       expect(await status(`/api/matches/${matchId}/history`)).toBe(404);
       expect(await status(`/api/matches/${matchId}/history/1`)).toBe(404);
     });
@@ -533,9 +532,10 @@ describe.skipIf(!url)("board", () => {
     });
   });
 
-  it("does not exist for a draft seen by someone else", async () => {
+  it("does not exist for a match played alone by someone else", async () => {
     const draft = await as("bruno", "POST", "/api/matches", {
-      name: "Bozza",
+      name: "Da solo",
+      mode: "SINGLEPLAYER",
       areaIds: [(await prisma.geoArea.findFirstOrThrow()).id],
       startAt: new Date(Date.now() + 86_400_000).toISOString(),
     });

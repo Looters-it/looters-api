@@ -113,7 +113,6 @@ describe.skipIf(!url)("battles", () => {
       startAt: new Date(Date.now() + 86_400_000).toISOString(),
     });
     matchId = created.json<{ id: string }>().id;
-    await as("anna", "POST", `/api/matches/${matchId}/open`);
     // Anna holds 0, 1, 2 (100, 41 and 10 resources); Bruno holds 3 (80) and 5; Carla holds 4.
     const players: [string, number, string][] = [
       ["anna", 0, "Anna"],
@@ -134,7 +133,7 @@ describe.skipIf(!url)("battles", () => {
     await prisma.territory.updateMany({ where: { matchId }, data: { protectedUntilTurn: null } });
     await prisma.match.update({
       where: { id: matchId },
-      data: { status: "RUNNING", currentTurn: 2, turnEndsAt: new Date(Date.now() + 3_600_000) },
+      data: { status: "ONGOING", currentTurn: 2, turnEndsAt: new Date(Date.now() + 3_600_000) },
     });
   });
   afterEach(async () => {

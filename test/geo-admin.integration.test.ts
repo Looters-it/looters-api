@@ -132,7 +132,7 @@ describe.skipIf(!url)("geo administration", () => {
       data: { username: "mario", email: "m@example.test", passwordHash: "x" },
     });
     const match = { ownerId: owner.id, startAt: new Date(), config: DEFAULT_MATCH_RULES };
-    await prisma.match.create({ data: { ...match, name: "Running", status: "RUNNING" } });
+    await prisma.match.create({ data: { ...match, name: "Running", status: "ONGOING" } });
     await prisma.match.create({ data: { ...match, name: "Draft" } });
 
     // The admin is not a player: it is not counted among the registered users.

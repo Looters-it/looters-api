@@ -50,8 +50,8 @@ export async function acting(tx: Tx, matchId: string, viewer: AuthContext, decid
   const matches = await tx.$queryRaw<Match[]>`
     SELECT * FROM "Match" WHERE id = ${matchId} FOR SHARE`;
   const match = matches[0];
-  if (!match || match.status === "DRAFT") throw notFound("Match");
-  if (match.status !== "RUNNING") {
+  if (!match) throw notFound("Match");
+  if (match.status !== "ONGOING") {
     throw conflict("MATCH_NOT_RUNNING", "The match is not being played");
   }
   if (decidedInTurn !== undefined && match.currentTurn !== decidedInTurn) {

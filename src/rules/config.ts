@@ -19,6 +19,8 @@ const matchRulesBase = z.strictObject({
   botsEnabled: z.boolean().default(false),
   // How many bots a match may have in all, counting those that fell.
   botsMax: z.number().int().min(0).max(100).default(5),
+  // How many bots are there when the match starts: the opponents of a single player.
+  botsAtStart: z.number().int().min(0).max(100).default(0),
   // Chance that a new bot appears when a turn begins.
   botSpawnChancePct: pct.default(30),
 

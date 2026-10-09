@@ -169,7 +169,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   /** After a restart: the bots of the matches in progress play the turn they may have missed. */
   app.decorate("wakeBots", async () => {
     const running = await deps.prisma.match.findMany({
-      where: { status: "RUNNING", config: { path: ["botsEnabled"], equals: true } },
+      where: { status: "ONGOING", config: { path: ["botsEnabled"], equals: true } },
       select: { id: true },
     });
     for (const match of running) botRunner?.matchChanged(match.id, "match.started");

@@ -84,7 +84,6 @@ describe.skipIf(!url)("turns, resources and annexations", () => {
       startAt: new Date(Date.now() + 86_400_000).toISOString(),
     });
     matchId = created.json<{ id: string }>().id;
-    await as("anna", "POST", `/api/matches/${matchId}/open`);
     await as("anna", "POST", `/api/matches/${matchId}/join`, {
       geoUnitId: unit[0],
       empire: { name: "Anna", color: EMPIRE_COLORS[0], emblem: "torre", motto: null },
@@ -95,7 +94,7 @@ describe.skipIf(!url)("turns, resources and annexations", () => {
     });
     await prisma.match.update({
       where: { id: matchId },
-      data: { status: "RUNNING", currentTurn: 1, turnEndsAt: new Date(Date.now() + 3_600_000) },
+      data: { status: "ONGOING", currentTurn: 1, turnEndsAt: new Date(Date.now() + 3_600_000) },
     });
   });
   afterEach(async () => {
@@ -204,7 +203,7 @@ describe.skipIf(!url)("turns, resources and annexations", () => {
       // Decided during turn 1, sent after turn 2 began.
       await prisma.match.update({ where: { id: matchId }, data: { currentTurn: 2 } });
       expect(errorCode(await annex("anna", 1, 0, 1))).toBe("TURN_CHANGED");
-      await prisma.match.update({ where: { id: matchId }, data: { status: "OPEN" } });
+      await prisma.match.update({ where: { id: matchId }, data: { status: "PLANNED" } });
       expect(errorCode(await annex("anna", 1, 0, 2))).toBe("MATCH_NOT_RUNNING");
     });
 

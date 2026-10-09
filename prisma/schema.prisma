@@ -28,11 +28,33 @@ enum UploadStatus {
   FAILED
 }
 
+// The stages of a match's life. More may come.
 enum MatchStatus {
-  DRAFT
-  OPEN
-  RUNNING
+  // Created and open to players, who may already choose their capital; not started yet.
+  PLANNED
+  // Being played: turns go by.
+  ONGOING
   FINISHED
+}
+
+enum MatchMode {
+  // Whoever created it, alone against bots.
+  SINGLEPLAYER
+  // People online; bots are an option.
+  MULTIPLAYER
+}
+
+enum MatchPace {
+  // Turns of thirty seconds. Kept apart from NORMAL: features of its own will come.
+  RUSH
+  // Turns as long as whoever created the match decided.
+  NORMAL
+}
+
+enum MatchVisibility {
+  PUBLIC
+  // Not in the lists: entered with the invite code.
+  PRIVATE
 }
 
 enum EmpireStatus {
@@ -191,7 +213,10 @@ model Match {
   name           String
   ownerId        String
   owner          User           @relation(fields: [ownerId], references: [id])
-  status         MatchStatus    @default(DRAFT)
+  status         MatchStatus    @default(PLANNED)
+  mode           MatchMode      @default(MULTIPLAYER)
+  pace           MatchPace      @default(NORMAL)
+  visibility     MatchVisibility @default(PUBLIC)
   startAt        DateTime
   maxDays        Int?
   maxPlayers     Int            @default(100)
