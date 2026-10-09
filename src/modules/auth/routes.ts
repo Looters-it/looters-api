@@ -4,7 +4,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { AuthGuard } from "../../auth/guard.js";
 import { hashPassword, verifyPassword } from "../../auth/password.js";
-import type { RateLimiter } from "../../auth/rate-limit.js";
+import { RateLimiter } from "../../auth/rate-limit.js";
 import type { SessionService } from "../../auth/sessions.js";
 import { AppError } from "../../http/errors.js";
 
@@ -35,6 +35,7 @@ const registerBody = z.strictObject({
    */
   contactTime: z.string().max(200).optional(),
 });
+const availabilityQuery = z.strictObject({ username });
 const loginBody = z.strictObject({ username: z.string().max(100), password: z.string().max(200) });
 
 /** Verified when the username does not exist, so that both cases take the same time. */
@@ -47,6 +48,8 @@ const tooManyAttempts = (seconds: number) =>
 
 export function registerAuthRoutes(app: FastifyInstance, deps: AuthRoutesDeps): void {
   const { prisma, sessions, guard, cookie, limits } = deps;
+  // One check per pause in typing: a person stays far below this.
+  const availabilityLimit = new RateLimiter({ max: 40, windowMs: 60_000 });
 
   const startSession = async (request: FastifyRequest, reply: FastifyReply, userId: string) => {
     const { token, expiresAt } = await sessions.create(userId, {
@@ -93,6 +96,23 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthRoutesDeps): 
       }
       throw error;
     }
+  });
+
+  // Asked by the registration form while the name is being typed. It tells no more
+  // than registering with that name would, and is counted per address all the same.
+  app.get("/api/auth/username-available", async (request) => {
+    const ipKey = `ip:${request.ip}`;
+    const wait = availabilityLimit.retryAfterSeconds(ipKey);
+    if (wait > 0) throw tooManyAttempts(wait);
+    availabilityLimit.hit(ipKey);
+
+    const query = availabilityQuery.parse(request.query);
+    // Names differing only by case are the same name, as for the unique index.
+    const taken = await prisma.user.findFirst({
+      where: { username: { equals: query.username, mode: "insensitive" } },
+      select: { id: true },
+    });
+    return { available: taken === null };
   });
 
   // Login is by username only: an email is never accepted as identifier.
