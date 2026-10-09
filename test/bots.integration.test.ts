@@ -111,8 +111,15 @@ describe.skipIf(!url)("bots", () => {
         config: { ...(match.config as object), botsAtStart: 2, botSpawnChancePct: 0 },
       },
     });
+    // Also in a match played alone, which nobody but its owner can enter.
+    await prisma.match.update({ where: { id: matchId }, data: { mode: "SINGLEPLAYER" } });
     await app.bots.playTurn(matchId);
     expect(await bots()).toHaveLength(2);
+    // And there they play: after a turn each holds more than its capital.
+    await prisma.match.update({ where: { id: matchId }, data: { currentTurn: 2 } });
+    await app.bots.playTurn(matchId);
+    expect((await bots()).some((bot) => bot.units > 1)).toBe(true);
+    await prisma.match.update({ where: { id: matchId }, data: { currentTurn: 1 } });
     // Played again, the first turn owes no more.
     await app.bots.playTurn(matchId);
     expect(await bots()).toHaveLength(2);

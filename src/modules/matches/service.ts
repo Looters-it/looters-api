@@ -128,13 +128,21 @@ export class MatchService {
   // ---------- Reading ----------
 
   /**
-   * A single-player match exists only for its owner. A private one is not in the
+   * A single-player match exists only for its owner and the empires in it. A private one is not in the
    * lists, but whoever has its address can look at it: the code is what lets in.
    */
   private async visible(id: string, viewer: Viewer): Promise<SummaryRow> {
     const row = await this.prisma.match.findUnique({ where: { id }, select: summarySelect });
-    if (!row || (row.mode === "SINGLEPLAYER" && row.ownerId !== viewer?.user.id)) {
-      throw notFound("Match");
+    if (!row) throw notFound("Match");
+    if (row.mode === "SINGLEPLAYER" && row.ownerId !== viewer?.user.id) {
+      // Its bots are in it too, and play through the same doors as a player.
+      const inside =
+        viewer &&
+        (await this.prisma.empire.findFirst({
+          where: { matchId: id, userId: viewer.user.id },
+          select: { id: true },
+        }));
+      if (!inside) throw notFound("Match");
     }
     return row;
   }
@@ -448,7 +456,8 @@ export class MatchService {
     /** A bot enters a running match whatever the rules for players say, and needs no code. */
     options: { asBot?: boolean } = {},
   ) {
-    await this.visible(id, viewer);
+    // A bot is let into the match it was made for, single-player ones included.
+    if (!options.asBot) await this.visible(id, viewer);
     await this.prisma.$transaction(async (tx) => {
       // Joins of one match run one at a time: seats, names and colours are checked safely.
       const rows = await tx.$queryRaw<Match[]>`SELECT * FROM "Match" WHERE id = ${id} FOR UPDATE`;
@@ -747,11 +756,13 @@ export class MatchService {
 
   async state(id: string, viewer: Viewer) {
     const data = await this.loadShared(id);
-    if (!data || (data.match.mode === "SINGLEPLAYER" && data.match.ownerId !== viewer?.user.id)) {
-      throw notFound("Match");
-    }
+    if (!data) throw notFound("Match");
     const { match, empires, territories, territoryNames, structures, alliances } = data;
     const mine = empires.find((empire) => empire.userId === viewer?.user.id) ?? null;
+    // A match played alone exists for its owner and for the empires in it: its bots.
+    if (match.mode === "SINGLEPLAYER" && match.ownerId !== viewer?.user.id && !mine) {
+      throw notFound("Match");
+    }
     const currentTurn = Math.max(match.currentTurn, 1);
     const rules = rulesOf(match);
 
