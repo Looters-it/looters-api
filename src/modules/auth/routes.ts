@@ -36,6 +36,10 @@ const registerBody = z.strictObject({
   contactTime: z.string().max(200).optional(),
 });
 const availabilityQuery = z.strictObject({ username });
+const passwordBody = z.strictObject({
+  currentPassword: z.string().max(200),
+  newPassword: password,
+});
 const loginBody = z.strictObject({ username: z.string().max(100), password: z.string().max(200) });
 
 /** Verified when the username does not exist, so that both cases take the same time. */
@@ -147,6 +151,31 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthRoutesDeps): 
       );
     }
     reply.clearCookie(cookie.name, { path: "/" });
+    return reply.code(204).send();
+  });
+
+  // Changing the password asks for the one in use, counted like a login: a session
+  // left open on a shared computer must not be enough to take the account.
+  app.post("/api/auth/password", async (request, reply) => {
+    const auth = await guard.user(request);
+    const body = passwordBody.parse(request.body);
+    const key = `password:${auth.user.id}`;
+    const wait = limits.login.retryAfterSeconds(key);
+    if (wait > 0) throw tooManyAttempts(wait);
+
+    const user = await prisma.user.findUniqueOrThrow({ where: { id: auth.user.id } });
+    if (!(await verifyPassword(user.passwordHash, body.currentPassword))) {
+      limits.login.hit(key);
+      throw new AppError(403, "WRONG_PASSWORD", "The current password is wrong");
+    }
+    limits.login.reset(key);
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { passwordHash: await hashPassword(body.newPassword) },
+    });
+    // Whoever else was in with the old password is out; this session stays.
+    const ended = await sessions.revokeOthers(user.id, auth.sessionId);
+    request.log.info({ userId: user.id, sessionsEnded: ended }, "password changed");
     return reply.code(204).send();
   });
 

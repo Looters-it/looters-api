@@ -178,7 +178,6 @@ describe.skipIf(!url)("matches", () => {
         players: 0,
         owner: "anna",
         isOwner: true,
-        hasInviteCode: false,
       });
       expect(match.config).toEqual({ ...DEFAULT_MATCH_RULES, annexCost: 80 });
     });
@@ -240,8 +239,8 @@ describe.skipIf(!url)("matches", () => {
       // Nobody else sees it, lists it or enters it.
       expect((await summary("bruno", id)).statusCode).toBe(404);
       expect((await as("bruno", "GET", `/api/matches/${id}/state`)).statusCode).toBe(404);
-      expect((await as("bruno", "GET", "/api/matches")).json()).toMatchObject({ total: 0 });
-      expect((await as("anna", "GET", "/api/matches")).json()).toMatchObject({ total: 1 });
+      expect((await as("anna", "GET", "/api/matches")).json()).toMatchObject({ total: 0 });
+      expect((await as("anna", "GET", "/api/matches/mine")).json<unknown[]>()).toHaveLength(1);
       const refused = await join("bruno", id, unitIds[0] ?? 0, { empire: empire("Intruso") });
       expect(refused.statusCode).toBe(404);
     });
@@ -270,24 +269,75 @@ describe.skipIf(!url)("matches", () => {
       expect(tooFast.statusCode).toBe(400);
     });
 
-    it("keeps a private match out of the lists and makes up its invite code", async () => {
+    it("keeps a private match for its owner and for whoever is invited", async () => {
       const id = await draft({ visibility: "PRIVATE" });
-      const mine = (await summary("anna", id)).json<{ inviteCode: string }>();
-      expect(mine).toMatchObject({ visibility: "PRIVATE", hasInviteCode: true });
-      expect(mine.inviteCode).toMatch(/^[A-Z2-9]{8}$/);
-      expect((await as("bruno", "GET", "/api/matches")).json()).toMatchObject({ total: 0 });
-      expect((await as("anna", "GET", "/api/matches")).json()).toMatchObject({ total: 1 });
-      // Whoever has the address can look at it; the code is what lets in.
-      expect((await summary("bruno", id)).statusCode).toBe(200);
-      const noCode = await join("bruno", id, unitIds[0] ?? 0, { empire: empire("Senza") });
-      expect(noCode.json()).toMatchObject({ error: { code: "INVITE_CODE_REQUIRED" } });
-      const withCode = await join("bruno", id, unitIds[0] ?? 0, {
-        empire: empire("Con"),
-        inviteCode: mine.inviteCode,
+      expect((await summary("anna", id)).json()).toMatchObject({ visibility: "PRIVATE" });
+      // Not in the list of matches, for anyone: the owner finds it among their own.
+      expect((await as("anna", "GET", "/api/matches")).json()).toMatchObject({ total: 0 });
+      expect((await as("anna", "GET", "/api/matches/mine")).json<unknown[]>()).toHaveLength(1);
+      // For who is not invited it does not exist.
+      expect((await summary("bruno", id)).statusCode).toBe(404);
+      expect((await as(null, "GET", `/api/matches/${id}/state`)).statusCode).toBe(404);
+      const refused = await join("bruno", id, unitIds[0] ?? 0, { empire: empire("Senza") });
+      expect(refused.statusCode).toBe(404);
+
+      const invited = await as("anna", "POST", `/api/matches/${id}/invitations`, {
+        username: "BRUNO",
       });
-      expect(withCode.statusCode).toBe(201);
-      // Once in, it is among the matches the player sees.
-      expect((await as("bruno", "GET", "/api/matches")).json()).toMatchObject({ total: 1 });
+      expect(invited.statusCode, invited.body).toBe(201);
+      expect(invited.json()).toMatchObject([{ username: "bruno", joined: false }]);
+      const mine = (await as("bruno", "GET", "/api/invitations")).json<
+        { id: string; match: { id: string; owner: string } }[]
+      >();
+      expect(mine).toMatchObject([{ match: { id, owner: "anna" } }]);
+      expect((await summary("bruno", id)).statusCode).toBe(200);
+
+      const entered = await join("bruno", id, unitIds[0] ?? 0, { empire: empire("Invitato") });
+      expect(entered.statusCode).toBe(201);
+      // Once in, the invitation has been answered.
+      expect((await as("bruno", "GET", "/api/invitations")).json()).toEqual([]);
+      expect((await as("anna", "GET", `/api/matches/${id}/invitations`)).json()).toMatchObject([
+        { username: "bruno", joined: true },
+      ]);
+    });
+
+    it("lets only the owner invite, once each, players that exist, to private matches", async () => {
+      const id = await draft({ visibility: "PRIVATE" });
+      const invite = (user: string, username: string, match = id) =>
+        as(user, "POST", `/api/matches/${match}/invitations`, { username });
+      expect((await invite("bruno", "carla")).statusCode).toBe(404);
+      expect((await invite("anna", "nessuno")).statusCode).toBe(404);
+      expect((await invite("anna", "anna")).json()).toMatchObject({ error: { code: "OWN_MATCH" } });
+      expect((await invite("anna", "carla")).statusCode).toBe(201);
+      expect((await invite("anna", "carla")).json()).toMatchObject({
+        error: { code: "ALREADY_INVITED" },
+      });
+      expect((await as("carla", "GET", `/api/matches/${id}/invitations`)).statusCode).toBe(403);
+      const open = await draft({ name: "Aperta" });
+      expect((await invite("anna", "carla", open)).json()).toMatchObject({
+        error: { code: "NOT_PRIVATE" },
+      });
+    });
+
+    it("lets an invitation be turned down by who got it and taken back by the owner", async () => {
+      const id = await draft({ visibility: "PRIVATE" });
+      const invite = async (username: string) =>
+        (await as("anna", "POST", `/api/matches/${id}/invitations`, { username })).json<
+          { id: string; username: string }[]
+        >();
+      await invite("bruno");
+      const all = await invite("carla");
+      const ofBruno = all.find((entry) => entry.username === "bruno")?.id ?? "";
+      const ofCarla = all.find((entry) => entry.username === "carla")?.id ?? "";
+
+      // Nobody turns down the invitation of another.
+      expect((await as("carla", "DELETE", `/api/invitations/${ofBruno}`)).statusCode).toBe(404);
+      expect((await as("bruno", "DELETE", `/api/invitations/${ofBruno}`)).statusCode).toBe(204);
+      expect((await summary("bruno", id)).statusCode).toBe(404);
+
+      const left = await as("anna", "DELETE", `/api/matches/${id}/invitations/${ofCarla}`);
+      expect(left.json()).toEqual([]);
+      expect((await as("carla", "GET", "/api/invitations")).json()).toEqual([]);
     });
 
     it("starts a match without a date as soon as its first player has a capital", async () => {
@@ -411,8 +461,6 @@ describe.skipIf(!url)("matches", () => {
       const page = await list("pageSize=1&page=2");
       expect(page.total).toBe(2);
       expect(page.matches).toHaveLength(1);
-      // The invite code never appears in a public list.
-      expect(JSON.stringify(await list(""))).not.toContain('inviteCode":');
     });
   });
 
@@ -535,29 +583,6 @@ describe.skipIf(!url)("matches", () => {
         empire: empire("Tre", EMPIRE_COLORS[2]),
       });
       expect(third.json()).toMatchObject({ error: { code: "MATCH_FULL" } });
-    });
-
-    it("asks for the invite code when the match has one, and shows it only to the owner", async () => {
-      const id = await openMatch({ visibility: "PRIVATE", inviteCode: "segreto" });
-      expect((await as("anna", "GET", `/api/matches/${id}`)).json()).toMatchObject({
-        inviteCode: "segreto",
-      });
-      const seen = await as("bruno", "GET", `/api/matches/${id}`);
-      expect(seen.json()).toMatchObject({ hasInviteCode: true });
-      expect(seen.body).not.toContain("segreto");
-
-      const without = await join("bruno", id, unitIds[0] ?? 0, { empire: empire("Bruno") });
-      expect(without.statusCode).toBe(403);
-      const wrong = await join("bruno", id, unitIds[0] ?? 0, {
-        empire: empire("Bruno"),
-        inviteCode: "x",
-      });
-      expect(wrong.json()).toMatchObject({ error: { code: "INVITE_CODE_REQUIRED" } });
-      const right = await join("bruno", id, unitIds[0] ?? 0, {
-        empire: empire("Bruno"),
-        inviteCode: "segreto",
-      });
-      expect(right.statusCode).toBe(201);
     });
 
     it("refuses guests, matches played alone by others and municipalities outside the match", async () => {

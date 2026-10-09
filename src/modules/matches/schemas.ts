@@ -18,7 +18,6 @@ const turnHours = z
 const mode = z.enum(["SINGLEPLAYER", "MULTIPLAYER"]);
 const pace = z.enum(["RUSH", "NORMAL"]);
 const visibility = z.enum(["PUBLIC", "PRIVATE"]);
-const inviteCode = z.string().trim().min(4).max(32).nullable();
 const areaIds = z.array(z.string().min(1)).min(1).max(50);
 
 export const createMatchBody = z.strictObject({
@@ -35,7 +34,6 @@ export const createMatchBody = z.strictObject({
   maxDays: maxDays.default(null),
   maxPlayers: maxPlayers.default(100),
   turnHours: turnHours.default(24),
-  inviteCode: inviteCode.default(null),
   /** Rule values that differ from the defaults. */
   config: matchRulesOverrides.default({}),
 });
@@ -47,7 +45,6 @@ export const updateMatchBody = z.strictObject({
   maxDays: maxDays.optional(),
   maxPlayers: maxPlayers.optional(),
   turnHours: turnHours.optional(),
-  inviteCode: inviteCode.optional(),
   config: matchRulesOverrides.optional(),
 });
 
@@ -55,7 +52,7 @@ export const updateMatchBody = z.strictObject({
  * What the owner may still change before the start. Players may already be in,
  * under these rules and on this map: the rest is fixed when the match is created.
  */
-export const PLANNED_EDITABLE = ["name", "startAt", "maxDays", "maxPlayers", "inviteCode"] as const;
+export const PLANNED_EDITABLE = ["name", "startAt", "maxDays", "maxPlayers"] as const;
 
 export const listMatchesQuery = z.object({
   // Planned and ongoing matches, or the finished ones.
@@ -66,6 +63,12 @@ export const listMatchesQuery = z.object({
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(50).default(6),
 });
+
+export const invitationParams = z.object({
+  id: z.string().min(1),
+  invitationId: z.string().min(1),
+});
+export const invitationBody = z.strictObject({ username: z.string().trim().min(1).max(100) });
 
 export const empireBody = z.strictObject({
   name: z.string().trim().min(3).max(40),
@@ -78,5 +81,4 @@ export const joinBody = z.strictObject({
   /** The municipality chosen as starting point: it becomes the capital. */
   geoUnitId: z.number().int().positive(),
   empire: empireBody,
-  inviteCode: z.string().trim().max(32).optional(),
 });

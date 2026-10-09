@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { Prisma, type Match, type PrismaClient } from "@prisma/client";
 import type { AuthContext } from "../../auth/sessions.js";
 import { recordEvent } from "../../events/events.js";
@@ -27,11 +27,6 @@ const conflict = (code: string, message: string) => new AppError(409, code, mess
 
 /** Opponents of a single player, when the request does not say how many. */
 const SINGLEPLAYER_BOTS = 3;
-/** Eight characters easy to read aloud and to type: no 0/O, no 1/I. */
-const newInviteCode = () => {
-  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  return [...randomBytes(8)].map((byte) => alphabet[byte % alphabet.length]).join("");
-};
 
 /** The rules of a match, as stored in full when it was created. */
 export const rulesOf = (match: Pick<Match, "config">): MatchRules =>
@@ -61,7 +56,6 @@ const summarySelect = {
   finishedAt: true,
   winnerEmpireId: true,
   winnerEmpireIds: true,
-  inviteCode: true,
   config: true,
   ownerId: true,
   owner: { select: { username: true } },
@@ -91,13 +85,11 @@ function summary(row: SummaryRow, viewer: Viewer) {
     /** More than one when the match ended with empires exactly level. */
     winnerEmpireIds: row.winnerEmpireIds,
     players: row._count.empires,
-    hasInviteCode: row.inviteCode !== null,
     owner: row.owner.username,
     areas: row.areas.map((entry) => entry.area),
-    // The rules are public: players need them to decide. The code is the owner's.
+    // The rules are public: players need them to decide.
     config: row.config,
     isOwner,
-    ...(isOwner ? { inviteCode: row.inviteCode } : {}),
   };
 }
 
@@ -128,22 +120,33 @@ export class MatchService {
   // ---------- Reading ----------
 
   /**
-   * A single-player match exists only for its owner and the empires in it. A private one is not in the
-   * lists, but whoever has its address can look at it: the code is what lets in.
+   * Who may look at a match that is not for everyone: its owner, the empires in
+   * it (its bots too, which play through the same doors as a player) and, when
+   * it is private, whoever the owner invited.
    */
+  private async admitted(
+    match: { id: string; ownerId: string; mode: string; visibility: string },
+    viewer: Viewer,
+    inside?: boolean,
+  ): Promise<boolean> {
+    if (match.mode !== "SINGLEPLAYER" && match.visibility === "PUBLIC") return true;
+    if (!viewer) return false;
+    if (match.ownerId === viewer.user.id || inside) return true;
+    const where = { matchId: match.id, userId: viewer.user.id };
+    if (
+      inside === undefined &&
+      (await this.prisma.empire.findFirst({ where, select: { id: true } }))
+    ) {
+      return true;
+    }
+    if (match.mode === "SINGLEPLAYER") return false;
+    return (await this.prisma.matchInvitation.findFirst({ where, select: { id: true } })) !== null;
+  }
+
+  /** A match the viewer may not look at does not exist, as far as they can tell. */
   private async visible(id: string, viewer: Viewer): Promise<SummaryRow> {
     const row = await this.prisma.match.findUnique({ where: { id }, select: summarySelect });
-    if (!row) throw notFound("Match");
-    if (row.mode === "SINGLEPLAYER" && row.ownerId !== viewer?.user.id) {
-      // Its bots are in it too, and play through the same doors as a player.
-      const inside =
-        viewer &&
-        (await this.prisma.empire.findFirst({
-          where: { matchId: id, userId: viewer.user.id },
-          select: { id: true },
-        }));
-      if (!inside) throw notFound("Match");
-    }
+    if (!row || !(await this.admitted(row, viewer))) throw notFound("Match");
     return row;
   }
 
@@ -158,8 +161,9 @@ export class MatchService {
   }
 
   /**
-   * The public matches, and the private ones the viewer owns or plays: those
-   * planned or ongoing, soonest first, or the finished ones, latest first.
+   * The matches anyone can take part in, multiplayer and public: those planned
+   * or ongoing, soonest first, or the finished ones, latest first. Private and
+   * single-player matches are reached from "mine" and from the invitations.
    */
   async list(query: z.infer<typeof listMatchesQuery>, viewer: Viewer) {
     const players = Prisma.sql`(SELECT count(*) FROM "Empire" e WHERE e."matchId" = m.id)`;
@@ -169,13 +173,9 @@ export class MatchService {
       m: Prisma.sql`${players} BETWEEN 21 AND 50`,
       l: Prisma.sql`${players} > 50`,
     };
-    const viewerId = viewer?.user.id ?? "";
     const finished = query.status === "finished";
     const where = Prisma.sql`${finished ? Prisma.sql`m.status = 'FINISHED'` : Prisma.sql`m.status IN ('PLANNED', 'ONGOING')`}
-      AND (
-        m.visibility = 'PUBLIC' OR m."ownerId" = ${viewerId}
-        OR EXISTS (SELECT 1 FROM "Empire" e WHERE e."matchId" = m.id AND e."userId" = ${viewerId})
-      )
+      AND m.visibility = 'PUBLIC' AND m.mode = 'MULTIPLAYER'
       ${query.name ? Prisma.sql`AND m.name ILIKE ${"%" + query.name.replace(/[%_\\]/g, "\\$&") + "%"}` : Prisma.empty}
       ${query.size ? Prisma.sql`AND ${size[query.size]}` : Prisma.empty}`;
 
@@ -273,10 +273,6 @@ export class MatchService {
             maxDays: body.maxDays,
             maxPlayers: single ? Math.max(2, rules.botsMax + 1) : body.maxPlayers,
             turnHours: body.pace === "RUSH" ? RUSH_TURN_SECONDS / 3600 : body.turnHours,
-            // The code is what lets into a private match: one is made up if none was given.
-            // Nobody else enters a single-player match, so it needs none.
-            inviteCode:
-              single || visibility === "PUBLIC" ? null : (body.inviteCode ?? newInviteCode()),
             // Stored in full, so changing a default never alters this match.
             config: rules,
             areas: { create: areaIds.map((areaId) => ({ areaId })) },
@@ -334,13 +330,6 @@ export class MatchService {
     if (body.startAt && body.startAt <= this.now()) {
       throw conflict("START_IN_PAST", "The start must be in the future");
     }
-    // A public match has no code, and a private one cannot be left without.
-    if (
-      body.inviteCode !== undefined &&
-      (body.inviteCode === null) !== (match.inviteCode === null)
-    ) {
-      throw conflict("MATCH_LOCKED", "The visibility of a match cannot be changed");
-    }
 
     await this.prisma.$transaction(async (tx) => {
       const { areaIds: _areaIds, config: _config, ...fields } = body;
@@ -372,6 +361,94 @@ export class MatchService {
     });
     if (others > 0) throw conflict("HAS_PLAYERS", "Other players are already in this match");
     await this.prisma.match.delete({ where: { id } });
+  }
+
+  // ---------- Invitations ----------
+
+  /** Only the owner of a private match invites, and only while it can still be entered. */
+  private async inviting(id: string, viewer: AuthContext) {
+    const match = await this.owned(id, viewer);
+    if (match.mode !== "MULTIPLAYER" || match.visibility !== "PRIVATE") {
+      throw conflict("NOT_PRIVATE", "Only a private match has invitations");
+    }
+    return match;
+  }
+
+  /** Whoever the owner invited, with whether they have come in yet. */
+  async invitations(id: string, viewer: AuthContext) {
+    await this.inviting(id, viewer);
+    const rows = await this.prisma.matchInvitation.findMany({
+      where: { matchId: id },
+      orderBy: { createdAt: "asc" },
+      select: { id: true, createdAt: true, userId: true, user: { select: { username: true } } },
+    });
+    const inside = new Set(
+      (await this.prisma.empire.findMany({ where: { matchId: id }, select: { userId: true } })).map(
+        (empire) => empire.userId,
+      ),
+    );
+    return rows.map((row) => ({
+      id: row.id,
+      username: row.user.username,
+      createdAt: row.createdAt,
+      joined: inside.has(row.userId),
+    }));
+  }
+
+  /** Invites a player, by username, to a private match. */
+  async invite(id: string, username: string, viewer: AuthContext) {
+    const match = await this.inviting(id, viewer);
+    if (match.status === "FINISHED") throw conflict("MATCH_LOCKED", "The match is over");
+    const user = await this.prisma.user.findFirst({
+      where: { username: { equals: username, mode: "insensitive" }, isBot: false },
+      select: { id: true },
+    });
+    if (!user) throw notFound("User");
+    if (user.id === viewer.user.id) throw conflict("OWN_MATCH", "The match is already yours");
+    try {
+      await this.prisma.matchInvitation.create({ data: { matchId: id, userId: user.id } });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        throw conflict("ALREADY_INVITED", "This player is already invited");
+      }
+      throw error;
+    }
+    return this.invitations(id, viewer);
+  }
+
+  /** Takes an invitation back. Who has already come in stays in. */
+  async uninvite(id: string, invitationId: string, viewer: AuthContext) {
+    await this.inviting(id, viewer);
+    await this.prisma.matchInvitation.deleteMany({ where: { id: invitationId, matchId: id } });
+    return this.invitations(id, viewer);
+  }
+
+  /** The invitations the viewer has not answered: matches still open that they are not in. */
+  async myInvitations(viewer: AuthContext) {
+    const rows = await this.prisma.matchInvitation.findMany({
+      where: {
+        userId: viewer.user.id,
+        match: {
+          status: { not: "FINISHED" },
+          empires: { none: { userId: viewer.user.id } },
+        },
+      },
+      orderBy: { createdAt: "desc" },
+      select: { id: true, createdAt: true, match: { select: summarySelect } },
+    });
+    return rows.map((row) => ({
+      id: row.id,
+      createdAt: row.createdAt,
+      match: summary(row.match, viewer),
+    }));
+  }
+
+  /** Turns an invitation down: the match is no longer there for the viewer. */
+  async declineInvitation(invitationId: string, viewer: AuthContext) {
+    const { count } = await this.prisma.matchInvitation.deleteMany({
+      where: { id: invitationId, userId: viewer.user.id },
+    });
+    if (count === 0) throw notFound("Invitation");
   }
 
   // ---------- Players ----------
@@ -471,9 +548,6 @@ export class MatchService {
       if (!open) throw conflict("REGISTRATION_CLOSED", "This match does not accept players");
       if (!options.asBot && match.mode === "SINGLEPLAYER" && match.ownerId !== viewer.user.id) {
         throw new AppError(403, "SINGLEPLAYER", "This match is played alone");
-      }
-      if (!options.asBot && match.inviteCode !== null && body.inviteCode !== match.inviteCode) {
-        throw new AppError(403, "INVITE_CODE_REQUIRED", "Wrong or missing invite code");
       }
       if (await tx.empire.findFirst({ where: { matchId: id, userId: viewer.user.id } })) {
         throw conflict("ALREADY_JOINED", "You already have an empire in this match");
@@ -759,10 +833,7 @@ export class MatchService {
     if (!data) throw notFound("Match");
     const { match, empires, territories, territoryNames, structures, alliances } = data;
     const mine = empires.find((empire) => empire.userId === viewer?.user.id) ?? null;
-    // A match played alone exists for its owner and for the empires in it: its bots.
-    if (match.mode === "SINGLEPLAYER" && match.ownerId !== viewer?.user.id && !mine) {
-      throw notFound("Match");
-    }
+    if (!(await this.admitted(match, viewer, mine !== null))) throw notFound("Match");
     const currentTurn = Math.max(match.currentTurn, 1);
     const rules = rulesOf(match);
 

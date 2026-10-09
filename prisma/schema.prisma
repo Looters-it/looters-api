@@ -113,6 +113,7 @@ model User {
   sessions     Session[]
   empires      Empire[]
   matches      Match[]
+  invitations  MatchInvitation[]
 
   @@index([email])
 }
@@ -223,7 +224,6 @@ model Match {
   turnHours      Float          @default(24)
   currentTurn    Int            @default(0)
   turnEndsAt     DateTime?
-  inviteCode     String?
   // Full rules configuration, materialised at creation (see src/rules/config.ts).
   config         Json
   winnerEmpireId String?
@@ -239,8 +239,23 @@ model Match {
   alliances      Alliance[]
   events         GameEvent[]
   snapshots      TurnSnapshot[]
+  invitations    MatchInvitation[]
 
   @@index([status])
+}
+
+// Who the owner of a private match has asked in. It stays after the player has
+// joined: it is what lets them see the match.
+model MatchInvitation {
+  id        String   @id @default(cuid())
+  matchId   String
+  match     Match    @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([matchId, userId])
+  @@index([userId])
 }
 
 model MatchArea {

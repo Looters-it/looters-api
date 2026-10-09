@@ -81,6 +81,76 @@ describe.skipIf(!url)("authentication", () => {
   const until = (condition: () => boolean) =>
     expect.poll(condition, { timeout: 3000, interval: 10 }).toBe(true);
 
+  describe("password and username", () => {
+    const post = (url: string, payload: object, cookie?: string) =>
+      app.inject({ method: "POST", url, payload, headers: cookie ? { cookie } : {} });
+    const sid = (response: { cookies: { name: string; value: string }[] }) =>
+      `sid=${response.cookies.find((c) => c.name === "sid")?.value ?? ""}`;
+
+    it("changes the password with the one in use, and ends the other sessions", async () => {
+      await start();
+      const account = { username: "dora", email: "d@example.test", password: "password-123" };
+      const here = sid(await post("/api/auth/register", account));
+      const elsewhere = sid(
+        await post("/api/auth/login", { username: "dora", password: account.password }),
+      );
+
+      const guest = await post("/api/auth/password", {
+        currentPassword: "x",
+        newPassword: "nuova-password-1",
+      });
+      expect(guest.statusCode).toBe(401);
+      const wrong = await post(
+        "/api/auth/password",
+        { currentPassword: "sbagliata", newPassword: "nuova-password-1" },
+        here,
+      );
+      expect(wrong.json()).toMatchObject({ error: { code: "WRONG_PASSWORD" } });
+      const short = await post(
+        "/api/auth/password",
+        { currentPassword: account.password, newPassword: "corta" },
+        here,
+      );
+      expect(short.statusCode).toBe(400);
+
+      const changed = await post(
+        "/api/auth/password",
+        { currentPassword: account.password, newPassword: "nuova-password-1" },
+        here,
+      );
+      expect(changed.statusCode).toBe(204);
+      // This session goes on, the other one is over, and only the new password lets in.
+      const me = (cookie: string) => app.inject({ url: "/api/auth/me", headers: { cookie } });
+      expect((await me(here)).statusCode).toBe(200);
+      expect((await me(elsewhere)).statusCode).toBe(401);
+      const old = await post("/api/auth/login", { username: "dora", password: account.password });
+      expect(old.statusCode).toBe(401);
+      const fresh = await post("/api/auth/login", {
+        username: "dora",
+        password: "nuova-password-1",
+      });
+      expect(fresh.statusCode).toBe(200);
+    });
+
+    it("says whether a username is free, whatever its case", async () => {
+      await start();
+      await post("/api/auth/register", {
+        username: "Elena",
+        email: "e@example.test",
+        password: "password-123",
+      });
+      const available = async (name: string) =>
+        (
+          await app.inject({ url: `/api/auth/username-available?username=${name}` })
+        ).json<unknown>();
+      expect(await available("elena")).toEqual({ available: false });
+      expect(await available("elena2")).toEqual({ available: true });
+      expect(
+        (await app.inject({ url: "/api/auth/username-available?username=a" })).statusCode,
+      ).toBe(400);
+    });
+  });
+
   describe("registration", () => {
     it("tells a programme that fills the hidden field that it registered, and creates nothing", async () => {
       await start();

@@ -76,6 +76,17 @@ export class SessionService {
     return true;
   }
 
+  /** Revokes every other session of a user: after a change of password. Returns how many. */
+  async revokeOthers(userId: string, keepSessionId: string): Promise<number> {
+    const others = await this.prisma.session.findMany({
+      where: { userId, revokedAt: null, id: { not: keepSessionId } },
+      select: { id: true },
+    });
+    let ended = 0;
+    for (const session of others) if (await this.revoke(session.id)) ended += 1;
+    return ended;
+  }
+
   /** Sessions that are still usable, most recently seen first. */
   listActive() {
     return this.prisma.session.findMany({

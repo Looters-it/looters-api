@@ -18,6 +18,8 @@ import {
   createMatchBody,
   empireBody,
   joinBody,
+  invitationBody,
+  invitationParams,
   listMatchesQuery,
   matchParams,
   updateMatchBody,
@@ -77,6 +79,31 @@ export function registerMatchRoutes(app: FastifyInstance, deps: MatchRoutesDeps)
   app.delete("/api/matches/:id", async (request, reply) => {
     const auth = await guard.user(request);
     await matches.remove(matchParams.parse(request.params).id, auth);
+    return reply.code(204).send();
+  });
+
+  // ---------- Invitations to a private match ----------
+  app.get("/api/matches/:id/invitations", async (request) =>
+    matches.invitations(matchParams.parse(request.params).id, await guard.user(request)),
+  );
+  app.post("/api/matches/:id/invitations", async (request, reply) => {
+    const auth = await guard.user(request);
+    const { id } = matchParams.parse(request.params);
+    const { username } = invitationBody.parse(request.body);
+    return reply.code(201).send(await matches.invite(id, username, auth));
+  });
+  app.delete("/api/matches/:id/invitations/:invitationId", async (request) => {
+    const auth = await guard.user(request);
+    const { id, invitationId } = invitationParams.parse(request.params);
+    return matches.uninvite(id, invitationId, auth);
+  });
+  // The invitations of the viewer, to any match.
+  app.get("/api/invitations", async (request) => matches.myInvitations(await guard.user(request)));
+  app.delete("/api/invitations/:id", async (request, reply) => {
+    await matches.declineInvitation(
+      matchParams.parse(request.params).id,
+      await guard.user(request),
+    );
     return reply.code(204).send();
   });
 
