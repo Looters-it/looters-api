@@ -84,6 +84,13 @@ export class RealtimeHub {
     this.closeWhere((connection) => connection.sessionId === sessionId);
   }
 
+  /** A session in use lives longer: so do its sockets. */
+  renewSession(sessionId: string, expiresAt: Date): void {
+    for (const connection of this.connections) {
+      if (connection.sessionId === sessionId) connection.expiresAt = expiresAt;
+    }
+  }
+
   /** Disconnects the sockets whose session has expired. */
   closeExpired(now: Date): void {
     this.closeWhere((connection) => connection.expiresAt !== null && connection.expiresAt <= now);

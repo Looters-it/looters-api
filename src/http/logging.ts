@@ -7,6 +7,8 @@ declare module "fastify" {
   interface FastifyRequest {
     /** Set by the auth guard once the session is known, for the request log. */
     userId: string | null;
+    /** Set by the auth guard when the session was renewed: the new expiry of its cookie. */
+    sessionRenewedUntil: Date | null;
   }
 }
 
@@ -49,6 +51,7 @@ const clientErrorBody = z.object({
  */
 export function registerRequestLogging(app: FastifyInstance): void {
   app.decorateRequest("userId", null);
+  app.decorateRequest("sessionRenewedUntil", null);
 
   app.addHook("onRequest", (request, reply, done) => {
     void reply.header("x-request-id", request.id);

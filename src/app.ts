@@ -95,7 +95,25 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   sessions.onRevoked = (sessionId) => {
     hub.closeSession(sessionId);
   };
+  sessions.onRenewed = (sessionId, expiresAt) => {
+    hub.renewSession(sessionId, expiresAt);
+  };
   const guard = createAuthGuard(sessions, auth.cookieName);
+  // A session that was renewed by this request has its cookie renewed with the answer.
+  app.addHook("onSend", (request, reply, _payload, done) => {
+    const token = request.cookies[auth.cookieName];
+    // Not when the answer itself sets or clears the cookie: logging in, logging out.
+    if (request.sessionRenewedUntil && token && !reply.hasHeader("set-cookie")) {
+      void reply.setCookie(auth.cookieName, token, {
+        httpOnly: true,
+        sameSite: "lax",
+        secure: auth.cookieSecure,
+        path: "/",
+        expires: request.sessionRenewedUntil,
+      });
+    }
+    done();
+  });
 
   registerHealthRoutes(app, deps.health);
   registerAuthRoutes(app, {

@@ -4,6 +4,8 @@ import { generateSessionToken, hashSessionToken } from "./tokens.js";
 export interface AuthContext {
   sessionId: string;
   expiresAt: Date;
+  /** True when this very request pushed the expiry forward: the cookie must follow. */
+  renewed?: boolean;
   user: { id: string; username: string; role: Role };
 }
 
@@ -12,7 +14,11 @@ export interface SessionMeta {
   userAgent?: string;
 }
 
-/** How stale `lastSeenAt` may get before a request refreshes it. */
+/**
+ * How stale `lastSeenAt` may get before a request refreshes it. The expiry is
+ * pushed forward at the same pace: a session lasts its whole length from the
+ * last time it was used, not from the login.
+ */
 const LAST_SEEN_RESOLUTION_MS = 60_000;
 
 /**
@@ -23,6 +29,8 @@ const LAST_SEEN_RESOLUTION_MS = 60_000;
 export class SessionService {
   /** Called after a session is revoked, to drop its live connections. */
   onRevoked: (sessionId: string) => void = () => undefined;
+  /** Called when a session in use lives longer, for whatever keeps its expiry. */
+  onRenewed: (sessionId: string, expiresAt: Date) => void = () => undefined;
 
   constructor(
     private readonly prisma: PrismaClient,
@@ -49,7 +57,10 @@ export class SessionService {
     return { token, expiresAt };
   }
 
-  /** The session behind a token, or null when it is unknown, revoked or expired. */
+  /**
+   * The session behind a token, or null when it is unknown, revoked or expired.
+   * Using a session renews it.
+   */
   async resolve(token: string | undefined): Promise<AuthContext | null> {
     if (!token) return null;
     const session = await this.prisma.session.findUnique({
@@ -60,7 +71,13 @@ export class SessionService {
     if (!session || session.revokedAt || session.expiresAt <= now) return null;
 
     if (now.getTime() - session.lastSeenAt.getTime() > LAST_SEEN_RESOLUTION_MS) {
-      await this.prisma.session.update({ where: { id: session.id }, data: { lastSeenAt: now } });
+      const expiresAt = new Date(now.getTime() + this.ttlMs);
+      await this.prisma.session.update({
+        where: { id: session.id },
+        data: { lastSeenAt: now, expiresAt },
+      });
+      this.onRenewed(session.id, expiresAt);
+      return { sessionId: session.id, expiresAt, renewed: true, user: session.user };
     }
     return { sessionId: session.id, expiresAt: session.expiresAt, user: session.user };
   }

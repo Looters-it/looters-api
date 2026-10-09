@@ -317,6 +317,28 @@ describe.skipIf(!url)("authentication", () => {
       await prisma.session.updateMany({ data: { expiresAt: new Date(Date.now() - 1000) } });
       expect((await get("/api/auth/me", cookie)).statusCode).toBe(401);
     });
+
+    it("renews a session that is used: its whole length again, cookie included", async () => {
+      await start();
+      const cookie = await sessionCookie("/api/auth/register", mario);
+      // Just used: nothing to renew, no cookie sent again.
+      const fresh = await get("/api/auth/me", cookie);
+      expect(fresh.cookies).toEqual([]);
+
+      // Used again after a while, with one day left to live.
+      const soon = new Date(Date.now() + 86_400_000);
+      await prisma.session.updateMany({
+        data: { expiresAt: soon, lastSeenAt: new Date(Date.now() - 3_600_000) },
+      });
+      const later = await get("/api/auth/me", cookie);
+      expect(later.statusCode).toBe(200);
+      const session = await prisma.session.findFirstOrThrow();
+      expect(session.expiresAt.getTime()).toBeGreaterThan(soon.getTime() + 86_400_000);
+      const renewed = later.cookies.find((c) => c.name === "sid");
+      expect(renewed?.value).toBe(cookie.replace("sid=", ""));
+      expect(renewed?.expires?.getTime()).toBeGreaterThan(soon.getTime());
+      expect(renewed).toMatchObject({ httpOnly: true, path: "/" });
+    });
   });
 
   describe("rate limiting", () => {

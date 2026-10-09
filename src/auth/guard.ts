@@ -16,6 +16,8 @@ export function createAuthGuard(sessions: SessionService, cookieName: string): A
     const auth = await sessions.resolve(request.cookies[cookieName]);
     // For the request log: who made the call.
     request.userId = auth?.user.id ?? null;
+    // The cookie expires with the session: when one moves, so must the other.
+    if (auth?.renewed) request.sessionRenewedUntil = auth.expiresAt;
     return auth;
   };
   const user = async (request: FastifyRequest) => {
