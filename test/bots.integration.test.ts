@@ -125,6 +125,26 @@ describe.skipIf(!url)("bots", () => {
     expect(await bots()).toHaveLength(2);
   });
 
+  it("takes a pause after every move, so that the map changes one move at a time", async () => {
+    const pauses: number[] = [];
+    app.bots.pause = (ms) => {
+      pauses.push(ms);
+      return Promise.resolve();
+    };
+    await app.bots.playTurn(matchId);
+    await app.bots.playTurn(matchId);
+    const moves =
+      (await prisma.gameEvent.count({ where: { matchId, type: "ANNEXED" } })) +
+      (await prisma.battle.count({ where: { matchId } }));
+    expect(moves).toBeGreaterThan(0);
+    // One pause for each territory annexed and each attack declared, never an endless one.
+    expect(pauses).toHaveLength(moves);
+    for (const ms of pauses) {
+      expect(ms).toBeGreaterThanOrEqual(300);
+      expect(ms).toBeLessThanOrEqual(2500);
+    }
+  });
+
   it("founds bot empires on free municipalities as turns begin, up to the limit of the match", async () => {
     expect(await bots()).toEqual([]);
     await app.bots.playTurn(matchId);

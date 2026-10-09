@@ -178,6 +178,8 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   };
   app.decorate("bots", bots);
   if (deps.runBots) {
+    // Only where the bots play by themselves do they take their time between moves.
+    bots.pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms).unref());
     botRunner = new BotRunner(bots);
     const runner = botRunner;
     app.addHook("onClose", () => {

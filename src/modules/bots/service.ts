@@ -12,6 +12,13 @@ import { rulesOf, type MatchService } from "../matches/service.js";
 /** A number in [0, 1): `Math.random` in the game, fixed in tests. */
 export type Random = () => number;
 
+/** Between two bots founded at the start of a match. */
+const BIRTH_PAUSE_MS = 700;
+/** The pause between two moves: within these bounds, and within this share of the turn. */
+const STEP_MIN_MS = 300;
+const STEP_MAX_MS = 2500;
+const TURN_SHARE = 0.6;
+
 const TITLES = ["Signoria", "Contea", "Marca", "Ducato", "Lega", "Repubblica", "Principato"];
 
 /** A bot plays through the same services as a player: it is given no session, only a name. */
@@ -34,6 +41,15 @@ export class BotService {
   /** Failures that are not the game saying no: for the log. */
   onError: (error: unknown, context: { matchId: string; empireId?: string }) => void = () =>
     undefined;
+
+  /**
+   * Waits between one move of a bot and the next. Where the game runs it is a real
+   * pause, so that the map changes a move at a time and the board is not flooded;
+   * in tests it is no wait at all.
+   */
+  pause: (ms: number) => Promise<void> = () => Promise.resolve();
+  /** The pause in use for the turn being played. */
+  private stepMs = 0;
 
   constructor(
     private readonly prisma: PrismaClient,
@@ -83,19 +99,24 @@ export class BotService {
   /**
    * What happens when a turn of a match begins: perhaps a new bot founds an
    * empire on a free municipality, then every bot plays its turn. The bots that
-   * a match has from its start are founded on its first turn, all together.
+   * a match has from its start are founded on its first turn.
+   *
+   * Nothing happens all at once: the moves are spread over the first part of the
+   * turn, one after the other with a pause between them.
    */
   async playTurn(matchId: string): Promise<void> {
     const running = await this.runningWithBots(matchId);
     if (!running) return;
+    const { match, rules } = running;
+    const turn = match.currentTurn;
     try {
-      const { match, rules } = running;
-      if (match.currentTurn === 1) {
+      if (turn === 1) {
         const there = await this.prisma.empire.count({
           where: { matchId, user: { isBot: true } },
         });
         for (let missing = rules.botsAtStart - there; missing > 0; missing--) {
           if (!(await this.maybeSpawn(matchId, true))) break;
+          await this.pause(BIRTH_PAUSE_MS);
         }
       } else {
         await this.maybeSpawn(matchId);
@@ -103,7 +124,19 @@ export class BotService {
     } catch (error) {
       this.onError(error, { matchId });
     }
-    for (const bot of this.shuffled(await this.bots(matchId))) {
+    const bots = this.shuffled(await this.bots(matchId));
+    // As many pauses as moves can be expected, within the part of the turn that is
+    // theirs: the rest is left to the players, and to the answers to the attacks.
+    const left = match.turnEndsAt ? match.turnEndsAt.getTime() - Date.now() : 0;
+    const moves = Math.max(1, bots.length * (rules.annexPerTurn + 1));
+    this.stepMs = Math.min(STEP_MAX_MS, Math.max(STEP_MIN_MS, (left * TURN_SHARE) / moves));
+    for (const bot of bots) {
+      // The turn went by while the others were moving: the rest belongs to the next.
+      const now = await this.prisma.match.findUnique({
+        where: { id: matchId },
+        select: { currentTurn: true, status: true },
+      });
+      if (now?.status !== "ONGOING" || now.currentTurn !== turn) return;
       try {
         await this.act(matchId, bot);
       } catch (error) {
@@ -268,6 +301,7 @@ export class BotService {
         if (next) {
           state = next;
           annexed = true;
+          await this.pause(this.stepMs);
           break;
         }
       }
@@ -302,7 +336,10 @@ export class BotService {
             viewer,
           ),
         );
-        if (declared) break;
+        if (declared) {
+          await this.pause(this.stepMs);
+          break;
+        }
       }
     }
   }
