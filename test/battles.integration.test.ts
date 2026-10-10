@@ -1,5 +1,6 @@
 import type { FastifyInstance, InjectOptions } from "fastify";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import { phaseOfRoute, setPhase } from "./phase.js";
 import { buildApp } from "../src/app.js";
 import { createPrisma } from "../src/db/prisma.js";
 import { attackCostPct, costOf, planAttack } from "../src/rules/attack.js";
@@ -143,12 +144,15 @@ describe.skipIf(!url)("battles", () => {
     await prisma.$disconnect();
   });
 
-  function as(
+  async function as(
     user: string | null,
     method: InjectOptions["method"],
     route: string,
     payload?: InjectOptions["payload"],
   ) {
+    // Each action in the part of the turn it belongs to: see phase.ts.
+    const phase = phaseOfRoute(method, route);
+    if (phase) await setPhase(prisma, matchId, phase);
     return app.inject({
       method,
       url: route,
@@ -379,26 +383,45 @@ describe.skipIf(!url)("battles", () => {
       expect((await territoryOf(4)).resources).toBeGreaterThanOrEqual(0);
     });
 
-    it("never moves resources out of a territory while an attack on it is being declared", async () => {
-      // Bruno empties Comune 3 into Comune 5 at the very moment Anna attacks it.
-      const [three, five] = await ids([3, 5]);
+    it("keeps moving resources and attacking in different parts of the turn", async () => {
+      // What used to race cannot meet any more: resources are moved in the preliminary
+      // part of a turn, attacks are declared after it. Asked without the helper, which
+      // would put each request in its own part.
+      const [two, three, five] = await ids([2, 3, 5]);
+      const post = (user: string, route: string, payload: object) =>
+        app.inject({
+          method: "POST",
+          url: `/api/matches/${matchId}/${route}`,
+          payload,
+          headers: { cookie: cookies[user] ?? "" },
+        });
       const total = 80 + (await territoryOf(5)).resources;
-      const [attacked, moved] = await Promise.all([
-        attack("anna", 3, [2]),
-        as("bruno", "POST", `/api/matches/${matchId}/allocate`, {
-          amounts: { [three ?? ""]: 0, [five ?? ""]: total },
-          turn: 2,
-        }),
-      ]);
-      expect(attacked.statusCode).toBe(201);
+      const move = { amounts: { [three ?? ""]: 0, [five ?? ""]: total }, turn: 2 };
+      const strike = { targetGeoUnitId: unit[3], fromTerritoryIds: [two], turn: 2 };
+      const targets = async () =>
+        (
+          await app.inject({
+            url: `/api/matches/${matchId}/targets`,
+            headers: { cookie: cookies.anna ?? "" },
+          })
+        ).json<{ territoryIds: string[] }>().territoryIds;
 
-      const battle = await prisma.battle.findFirstOrThrow();
-      const target = await territoryOf(3);
-      // Either the move came first (and the attack found an empty territory) or it was
-      // refused: in both cases the recorded strength is what is really on the territory.
-      expect(battle.defenseForce).toBe(target.resources);
-      expect([200, 409]).toContain(moved.statusCode);
-      if (moved.statusCode === 409) expect(errorCode(moved)).toBe("TERRITORY_IN_BATTLE");
+      await setPhase(prisma, matchId, "PRELIMINARY");
+      expect(errorCode(await post("anna", "attacks", strike))).toBe("WRONG_PHASE");
+      expect(await targets()).toEqual([]);
+      const preliminary = (await app.inject({ url: `/api/matches/${matchId}/state` })).json<{
+        match: { preliminaryEndsAt: string; turnEndsAt: string };
+      }>().match;
+      expect(Date.parse(preliminary.preliminaryEndsAt)).toBeGreaterThan(Date.now());
+      expect(Date.parse(preliminary.preliminaryEndsAt)).toBeLessThan(
+        Date.parse(preliminary.turnEndsAt),
+      );
+      expect((await post("bruno", "allocate", move)).statusCode).toBe(200);
+
+      await setPhase(prisma, matchId, "ACTION");
+      expect(errorCode(await post("bruno", "allocate", move))).toBe("WRONG_PHASE");
+      expect(await targets()).toContain(three);
+      expect((await post("anna", "attacks", strike)).statusCode).toBe(201);
     });
   });
 

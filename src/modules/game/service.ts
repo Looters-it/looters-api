@@ -1,3 +1,4 @@
+import { phaseOf } from "../../rules/phases.js";
 import type { PrismaClient } from "@prisma/client";
 import { z } from "zod";
 import type { AuthContext } from "../../auth/sessions.js";
@@ -113,7 +114,10 @@ export class GameService {
           where: { matchId, userId: viewer.user.id, status: "ACTIVE" },
         })
       : null;
-    if (!mine || match.status !== "ONGOING") return { territoryIds: [] };
+    // Nothing is attacked while the turn is in its preliminary part.
+    if (!mine || match.status !== "ONGOING" || phaseOf(match) !== "ACTION") {
+      return { territoryIds: [] };
+    }
 
     const [alliances, structures] = await Promise.all([
       this.prisma.alliance.findMany({
@@ -306,7 +310,7 @@ export class GameService {
    */
   async annex(matchId: string, body: z.infer<typeof annexBody>, viewer: AuthContext) {
     await this.prisma.$transaction(async (tx) => {
-      const { match, empire, rules } = await acting(tx, matchId, viewer, body.turn);
+      const { match, empire, rules } = await acting(tx, matchId, viewer, body.turn, "ACTION");
       if (empire.annexedThisTurn >= rules.annexPerTurn) {
         throw conflict("ANNEX_LIMIT", "No annexations left this turn");
       }
@@ -387,7 +391,7 @@ export class GameService {
     if (ids.length === 0) return this.matches.state(matchId, viewer);
 
     await this.prisma.$transaction(async (tx) => {
-      const { empire } = await acting(tx, matchId, viewer, body.turn);
+      const { empire } = await acting(tx, matchId, viewer, body.turn, "PRELIMINARY");
       const territories = (await lockTerritories(tx, matchId, ids)).filter(
         (territory) => territory.ownerEmpireId === empire.id,
       );
@@ -456,7 +460,7 @@ export class GameService {
    */
   async moveCapital(matchId: string, body: z.infer<typeof capitalBody>, viewer: AuthContext) {
     await this.prisma.$transaction(async (tx) => {
-      const { match, empire, rules } = await acting(tx, matchId, viewer, body.turn);
+      const { match, empire, rules } = await acting(tx, matchId, viewer, body.turn, "PRELIMINARY");
       if (empire.capitalTerritoryId === body.territoryId) {
         throw conflict("ALREADY_CAPITAL", "This territory is already the capital");
       }

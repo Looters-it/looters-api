@@ -1,3 +1,4 @@
+import { preliminaryEndsAt } from "../../rules/phases.js";
 import { randomBytes } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
 import type { AuthContext } from "../../auth/sessions.js";
@@ -18,6 +19,8 @@ const BIRTH_PAUSE_MS = 700;
 const STEP_MIN_MS = 300;
 const STEP_MAX_MS = 2500;
 const TURN_SHARE = 0.6;
+/** Waited past the end of the preliminary part, so that the first move is not early. */
+const PHASE_MARGIN_MS = 250;
 
 const TITLES = ["Signoria", "Contea", "Marca", "Ducato", "Lega", "Repubblica", "Principato"];
 
@@ -92,7 +95,11 @@ export class BotService {
     return this.prisma.empire.findMany({
       where: { matchId, status: "ACTIVE", user: { isBot: true } },
       orderBy: { joinedAt: "asc" },
-      select: { id: true, user: { select: { id: true, username: true } } },
+      select: {
+        id: true,
+        capitalTerritoryId: true,
+        user: { select: { id: true, username: true } },
+      },
     });
   }
 
@@ -125,6 +132,19 @@ export class BotService {
       this.onError(error, { matchId });
     }
     const bots = this.shuffled(await this.bots(matchId));
+    // The preliminary part of the turn is for putting the empire in order; what the
+    // bots do to the others waits for it to end, as it does for the players.
+    const preliminaryEnd = preliminaryEndsAt(match);
+    if (preliminaryEnd && preliminaryEnd.getTime() > Date.now()) {
+      for (const bot of bots) {
+        try {
+          await this.prepare(matchId, bot, turn);
+        } catch (error) {
+          this.onError(error, { matchId, empireId: bot.id });
+        }
+      }
+      await this.pause(Math.max(0, preliminaryEnd.getTime() - Date.now()) + PHASE_MARGIN_MS);
+    }
     // As many pauses as moves can be expected, within the part of the turn that is
     // theirs: the rest is left to the players, and to the answers to the attacks.
     const left = match.turnEndsAt ? match.turnEndsAt.getTime() - Date.now() : 0;
@@ -262,6 +282,23 @@ export class BotService {
     }
   }
 
+  /** What a bot does in the preliminary part of a turn: once in a while, a block on its capital. */
+  private async prepare(
+    matchId: string,
+    bot: { id: string; capitalTerritoryId: string | null; user: { id: string; username: string } },
+    turn: number,
+  ) {
+    const capital = bot.capitalTerritoryId;
+    if (!capital || this.random() >= 0.1) return;
+    await this.attempt(() =>
+      this.structures.build(
+        matchId,
+        { type: "BLOCK", territoryId: capital, turn },
+        viewerOf(bot.user),
+      ),
+    );
+  }
+
   /** One bot's turn: answer what waits for an answer, grow, and sometimes strike. */
   private async act(matchId: string, bot: { user: { id: string; username: string } }) {
     const viewer = viewerOf(bot.user);
@@ -306,14 +343,6 @@ export class BotService {
         }
       }
       if (!annexed) break;
-    }
-
-    // A block on the capital, once in a while and when it can be afforded.
-    const capital = state.empires.find((e) => e.id === mineId)?.capitalTerritoryId;
-    if (capital && this.random() < 0.1) {
-      await this.attempt(() =>
-        this.structures.build(matchId, { type: "BLOCK", territoryId: capital, turn }, viewer),
-      );
     }
 
     // Attack a neighbour, about every other turn.

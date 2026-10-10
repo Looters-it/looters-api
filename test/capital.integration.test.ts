@@ -1,5 +1,6 @@
 import type { FastifyInstance, InjectOptions } from "fastify";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import { phaseOfRoute, setPhase } from "./phase.js";
 import { buildApp } from "../src/app.js";
 import { createPrisma } from "../src/db/prisma.js";
 import { EMPIRE_COLORS } from "../src/rules/catalogue.js";
@@ -102,12 +103,15 @@ describe.skipIf(!url)("capital, fall and end of the match", () => {
     await prisma.$disconnect();
   });
 
-  function as(
+  async function as(
     user: string | null,
     method: InjectOptions["method"],
     route: string,
     payload?: InjectOptions["payload"],
   ) {
+    // Each action in the part of the turn it belongs to: see phase.ts.
+    const phase = phaseOfRoute(method, route);
+    if (phase) await setPhase(prisma, matchId, phase);
     return app.inject({
       method,
       url: route,

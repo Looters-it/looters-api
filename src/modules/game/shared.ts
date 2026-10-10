@@ -2,6 +2,7 @@ import type { Empire, Match, Prisma, PrismaClient } from "@prisma/client";
 import type { AuthContext } from "../../auth/sessions.js";
 import { AppError, notFound } from "../../http/errors.js";
 import { rulesOf } from "../matches/service.js";
+import { phaseOf, type TurnPhase } from "../../rules/phases.js";
 
 export type Tx = Prisma.TransactionClient;
 
@@ -44,9 +45,16 @@ export function neighboursOf(db: Tx | PrismaClient, matchId: string, territoryId
  * action never straddles two turns. The player's empire is held
  * exclusively, so two actions of the same player never overlap.
  * `decidedInTurn` is the turn the player was looking at: omitted for
- * actions that are valid in whatever turn they arrive.
+ * actions that are valid in whatever turn they arrive. `phase` is the part of
+ * the turn the action belongs to: omitted for what can be done throughout.
  */
-export async function acting(tx: Tx, matchId: string, viewer: AuthContext, decidedInTurn?: number) {
+export async function acting(
+  tx: Tx,
+  matchId: string,
+  viewer: AuthContext,
+  decidedInTurn?: number,
+  phase?: TurnPhase,
+) {
   const matches = await tx.$queryRaw<Match[]>`
     SELECT * FROM "Match" WHERE id = ${matchId} FOR SHARE`;
   const match = matches[0];
@@ -56,6 +64,14 @@ export async function acting(tx: Tx, matchId: string, viewer: AuthContext, decid
   }
   if (decidedInTurn !== undefined && match.currentTurn !== decidedInTurn) {
     throw conflict("TURN_CHANGED", "The turn has changed: look at the map again");
+  }
+  if (phase !== undefined && phaseOf(match) !== phase) {
+    throw conflict(
+      "WRONG_PHASE",
+      phase === "PRELIMINARY"
+        ? "This is done in the preliminary part of the turn"
+        : "This is done after the preliminary part of the turn",
+    );
   }
   const empires = await tx.$queryRaw<Empire[]>`
     SELECT * FROM "Empire" WHERE "matchId" = ${matchId} AND "userId" = ${viewer.user.id} FOR UPDATE`;

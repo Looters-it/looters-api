@@ -8,6 +8,7 @@ import { matchRulesSchema, resolveMatchRules, type MatchRules } from "../../rule
 import { drawHiddenResources, secureRandom, type Random } from "../../rules/hidden-resources.js";
 import { costOf } from "../../rules/attack.js";
 import { turnIncome } from "../../rules/income.js";
+import { preliminaryEndsAt } from "../../rules/phases.js";
 import { structureDefinition } from "../../rules/structures.js";
 import type { z } from "zod";
 import {
@@ -80,6 +81,8 @@ function summary(row: SummaryRow, viewer: Viewer) {
     turnHours: row.turnHours,
     currentTurn: row.currentTurn,
     turnEndsAt: row.turnEndsAt,
+    /** Until then the turn is in its preliminary part: see rules/phases. */
+    preliminaryEndsAt: row.status === "ONGOING" ? preliminaryEndsAt(row) : null,
     finishedAt: row.finishedAt,
     winnerEmpireId: row.winnerEmpireId,
     /** More than one when the match ended with empires exactly level. */

@@ -174,7 +174,7 @@ export class BattleService {
     let incoming: { defenderUserId: string; battleId: string };
     try {
       incoming = await this.prisma.$transaction(async (tx) => {
-        const { match, empire, rules } = await acting(tx, matchId, viewer, body.turn);
+        const { match, empire, rules } = await acting(tx, matchId, viewer, body.turn, "ACTION");
         const { target, defender, sources, plan } = await this.plan(
           tx,
           matchId,

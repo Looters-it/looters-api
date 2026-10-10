@@ -124,7 +124,7 @@ export class StructureService {
     if (!definition) throw new AppError(400, "UNKNOWN_STRUCTURE", "No such structure");
 
     await this.prisma.$transaction(async (tx) => {
-      const { match, empire, rules } = await acting(tx, matchId, viewer, body.turn);
+      const { match, empire, rules } = await acting(tx, matchId, viewer, body.turn, "PRELIMINARY");
       const territory = (await lockTerritories(tx, matchId, [body.territoryId]))[0];
       if (territory?.ownerEmpireId !== empire.id) {
         throw conflict("NOT_YOUR_TERRITORY", "You can build only on your own territories");
@@ -195,7 +195,7 @@ export class StructureService {
     viewer: AuthContext,
   ) {
     await this.prisma.$transaction(async (tx) => {
-      const { match, empire, rules } = await acting(tx, matchId, viewer, body.turn);
+      const { match, empire, rules } = await acting(tx, matchId, viewer, body.turn, "PRELIMINARY");
       const structure = await tx.structure.findFirst({
         where: { id: structureId, matchId, empireId: empire.id, active: true },
       });
@@ -324,7 +324,7 @@ export class StructureService {
    */
   async merge(matchId: string, body: z.infer<typeof mergeBody>, viewer: AuthContext) {
     await this.prisma.$transaction(async (tx) => {
-      const { match, empire, rules } = await acting(tx, matchId, viewer, body.turn);
+      const { match, empire, rules } = await acting(tx, matchId, viewer, body.turn, "PRELIMINARY");
       const plan = await this.planMerge(tx, matchId, empire, rules, body.territoryIds);
       if (plan.problem) throw conflict(`MERGE_${plan.problem}`, `Cannot merge: ${plan.problem}`);
 

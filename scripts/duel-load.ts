@@ -7,8 +7,10 @@
  * closed each second. See docs/LOAD.md for how to run it.
  *
  * Players are created straight in the database with a session each, and each match is
- * prepared there for fighting at once (no protection on the capitals, resources enough
- * for many attacks). Everything else goes through the public HTTP interface.
+ * kept there in a state the rules would not allow, so that the fight never stops: past
+ * the preliminary part of its turn, with resources enough for many attacks and without
+ * the protection a territory gets when it is acquired or attacked. Everything else
+ * goes through the public HTTP interface.
  */
 import { performance } from "node:perf_hooks";
 import { PrismaClient } from "@prisma/client";
@@ -175,6 +177,12 @@ const supply = (fight: Pick<Fight, "matchId" | "from">) => prisma.$executeRaw`
     resources = CASE WHEN id = ${fight.from} THEN ${ATTACKER_RESOURCES}::int ELSE ${DEFENDER_RESOURCES}::int END
   WHERE "matchId" = ${fight.matchId} AND "ownerEmpireId" IS NOT NULL`;
 
+/** Lifts the protection a territory gets from having been attacked in this turn. */
+const reopen = (fight: Pick<Fight, "matchId">) => prisma.$executeRaw`
+  UPDATE "Territory" SET "protectedUntilTurn" = NULL
+  WHERE "matchId" = ${fight.matchId} AND "ownerEmpireId" IS NOT NULL
+    AND "protectedUntilTurn" IS NOT NULL`;
+
 /**
  * Opens a match for the pair on two municipalities that share a border, waits for it
  * to start, then makes it ready for fighting. Returns the match and the territory the
@@ -226,6 +234,11 @@ async function openMatch(
       if (!mine) return null;
       const fight = { matchId, from: mine.id, turn: data.match.currentTurn, duels: 0 };
       await supply(fight);
+      // Past the preliminary part of the turn, in which nobody attacks.
+      await prisma.match.update({
+        where: { id: matchId },
+        data: { turnEndsAt: new Date(Date.now() + 3_600_000) },
+      });
       return fight;
     }
     if (Date.now() > deadline) return null;
@@ -243,6 +256,8 @@ async function duel(pair: Pair, match: Fight, target: number): Promise<boolean> 
     return false;
   };
   if (match.duels > 0 && match.duels % SUPPLY_EVERY === 0) await supply(match);
+  // A territory that was attacked is left alone until the turn ends: here it is not.
+  else if (match.duels > 0) await reopen(match);
   match.duels += 1;
   const attack = await call<Failure>(pair.attacker, "POST attack", "POST", `${base}/attacks`, {
     targetGeoUnitId: target,
