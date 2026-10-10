@@ -160,7 +160,7 @@ describe.skipIf(!url)("bots", () => {
       expect(bot.username).toMatch(/^bot_/);
       expect(bot.units).toBeGreaterThanOrEqual(1);
     }
-    // The first appears near the player: two municipalities away, not touching.
+    // The first appears away from the player, who needs room to grow: four municipalities off.
     const firstBot = await prisma.empire.findFirstOrThrow({
       where: { matchId, user: { isBot: true } },
       orderBy: { joinedAt: "asc" },
@@ -168,7 +168,7 @@ describe.skipIf(!url)("bots", () => {
     const capital = await prisma.territoryUnit.findFirstOrThrow({
       where: { territoryId: firstBot.capitalTerritoryId ?? "" },
     });
-    expect(capital.geoUnitId).toBe(unit[2]);
+    expect(capital.geoUnitId).toBe(unit[4]);
     // The player is not one of them, and is told so.
     expect((await state()).empires.find((empire) => empire.name === "Anna")?.isBot).toBe(false);
     // Founding one is announced like any other empire.

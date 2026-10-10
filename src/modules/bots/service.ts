@@ -1,6 +1,6 @@
 import { preliminaryEndsAt } from "../../rules/phases.js";
 import { randomBytes } from "node:crypto";
-import type { PrismaClient } from "@prisma/client";
+import { Prisma, type PrismaClient } from "@prisma/client";
 import type { AuthContext } from "../../auth/sessions.js";
 import { AppError } from "../../http/errors.js";
 import { EMPIRE_COLORS, EMPIRE_EMBLEMS } from "../../rules/catalogue.js";
@@ -194,10 +194,13 @@ export class BotService {
     if (botCount >= rules.botsMax || empires.length >= match.maxPlayers) return null;
     if (!force && this.random() * 100 >= rules.botSpawnChancePct) return null;
 
-    // Near the empires that are there, so that it becomes a neighbour to deal with:
-    // a free municipality two steps from an owned one, never touching it. On a map of
-    // thousands of municipalities, anywhere at random would be nowhere.
-    const near = await this.prisma.$queryRaw<{ geoUnitId: number; name: string }[]>`
+    // Away from the players, who need room to grow before they meet anyone, but not
+    // nowhere: on the ring of free municipalities exactly four steps from what
+    // a player holds, and touching no empire. On a map of thousands of municipalities,
+    // anywhere at random would be nowhere.
+    const candidates = (tier: Prisma.Sql) => this.prisma.$queryRaw<
+      { geoUnitId: number; name: string }[]
+    >`
       WITH edges AS (
         SELECT "aId" AS x, "bId" AS y FROM "GeoAdjacency"
         UNION ALL SELECT "bId", "aId" FROM "GeoAdjacency"
@@ -206,26 +209,30 @@ export class BotService {
         FROM "TerritoryUnit" tu JOIN "Territory" t ON t.id = tu."territoryId"
         WHERE tu."matchId" = ${matchId}
       ), owned AS (SELECT id FROM units WHERE owner IS NOT NULL),
-      beside AS (SELECT DISTINCT e.y AS id FROM edges e JOIN owned o ON o.id = e.x)
-      SELECT DISTINCT u.id AS "geoUnitId", g.name
-      FROM beside b
-      JOIN edges e ON e.x = b.id
-      JOIN units u ON u.id = e.y AND u.owner IS NULL
-      JOIN "GeoUnit" g ON g.id = u.id
-      WHERE u.id NOT IN (SELECT id FROM beside)
-      LIMIT 200`;
-    // Otherwise any free municipality that borders something: an island would strand it.
-    const free =
-      near.length > 0
-        ? near
-        : await this.prisma.$queryRaw<{ geoUnitId: number; name: string }[]>`
-            SELECT tu."geoUnitId", u.name
-            FROM "Territory" t
-            JOIN "TerritoryUnit" tu ON tu."territoryId" = t.id
-            JOIN "GeoUnit" u ON u.id = tu."geoUnitId"
-            WHERE t."matchId" = ${matchId} AND t."ownerEmpireId" IS NULL
-              AND EXISTS (SELECT 1 FROM "GeoAdjacency" a WHERE a."aId" = u.id OR a."bId" = u.id)
-            ORDER BY random() LIMIT 20`;
+      beside AS (SELECT DISTINCT e.y AS id FROM edges e JOIN owned o ON o.id = e.x),
+      d0 AS (
+        SELECT u.id FROM units u
+        JOIN "Empire" e ON e.id = u.owner JOIN "User" p ON p.id = e."userId"
+        WHERE NOT p."isBot"
+      ),
+      d1 AS (SELECT DISTINCT e.y AS id FROM edges e JOIN d0 ON d0.id = e.x),
+      d2 AS (SELECT DISTINCT e.y AS id FROM edges e JOIN d1 ON d1.id = e.x),
+      d3 AS (SELECT DISTINCT e.y AS id FROM edges e JOIN d2 ON d2.id = e.x),
+      d4 AS (SELECT DISTINCT e.y AS id FROM edges e JOIN d3 ON d3.id = e.x),
+      close AS (
+        SELECT id FROM d0 UNION SELECT id FROM d1 UNION SELECT id FROM d2 UNION SELECT id FROM d3
+      )
+      SELECT u.id AS "geoUnitId", g.name
+      FROM units u JOIN "GeoUnit" g ON g.id = u.id
+      WHERE u.owner IS NULL AND EXISTS (SELECT 1 FROM edges e WHERE e.x = u.id) AND ${tier}
+      ORDER BY random() LIMIT 50`;
+    // Then anywhere at least as far, even beside another bot; and on a map too small
+    // for that, any free municipality that borders something: an island would strand it.
+    let free = await candidates(Prisma.sql`
+      u.id IN (SELECT id FROM d4) AND u.id NOT IN (SELECT id FROM close)
+      AND u.id NOT IN (SELECT id FROM beside)`);
+    if (free.length === 0) free = await candidates(Prisma.sql`u.id NOT IN (SELECT id FROM close)`);
+    if (free.length === 0) free = await candidates(Prisma.sql`true`);
     const start = this.pick(free);
     const color = EMPIRE_COLORS.find((candidate) => !empires.some((e) => e.color === candidate));
     if (!start || !color) return null;
