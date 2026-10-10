@@ -105,7 +105,29 @@ function moveInTurns(
   return lastMove === undefined ? 0 : Math.max(0, lastMove + every - currentTurn);
 }
 
+/** Lets a few through at a time; the others wait in the order they came. */
+class Gate {
+  private free: number;
+  private readonly waiting: (() => void)[] = [];
+  constructor(size: number) {
+    this.free = size;
+  }
+  async acquire(): Promise<() => void> {
+    if (this.free > 0) this.free -= 1;
+    else await new Promise<void>((resolve) => this.waiting.push(resolve));
+    return () => {
+      const next = this.waiting.shift();
+      if (next) next();
+      else this.free += 1;
+    };
+  }
+}
+
+/** How many matches are written to the database at the same time. */
+const CREATING_AT_ONCE = 2;
+
 export class MatchService {
+  private readonly creating = new Gate(CREATING_AT_ONCE);
   /** Called after a change that the followers of a match should see. */
   onChange: (matchId: string, kind: string) => void = () => undefined;
   /** Players of a match that are watching it right now. */
@@ -259,6 +281,37 @@ export class MatchService {
     );
     if (units.length < 2) throw conflict("NO_UNITS", "The chosen areas have no municipalities");
 
+    // Thousands of rows in one transaction: a few at a time, so that many matches
+    // created together wait for their turn instead of taking every connection from
+    // the matches being played.
+    const release = await this.creating.acquire();
+    try {
+      return await this.createRows(body, viewer, {
+        areaIds,
+        single,
+        now,
+        rules,
+        visibility,
+        units,
+      });
+    } finally {
+      release();
+    }
+  }
+
+  private async createRows(
+    body: z.infer<typeof createMatchBody>,
+    viewer: AuthContext,
+    made: {
+      areaIds: string[];
+      single: boolean;
+      now: Date;
+      rules: MatchRules;
+      visibility: "PUBLIC" | "PRIVATE";
+      units: { id: number; name: string }[];
+    },
+  ) {
+    const { areaIds, single, now, rules, visibility, units } = made;
     const id = await this.prisma.$transaction(
       async (tx) => {
         const match = await tx.match.create({
@@ -306,7 +359,8 @@ export class MatchService {
         if (body.startAt) await this.scheduleStart(tx, match.id, body.startAt);
         return match.id;
       },
-      { timeout: 60_000 },
+      // The wait covers a connection that is busy for a moment, not only a free one.
+      { timeout: 60_000, maxWait: 30_000 },
     );
     this.onChange(id, "match");
     return this.get(id, viewer);
