@@ -1055,6 +1055,12 @@ export class MatchService {
                   battle.defenseCost ?? costOf(battle.defenseForce ?? 0, rules.defensePct),
               }
             : {}),
+          // What a battle paid is told to who won it, and to nobody else: with it the
+          // loser could work out what the winner had spent.
+          ...(battle.spoils !== null &&
+          role === (battle.outcome === "DEFENDER_WON" ? "defender" : "attacker")
+            ? { spoils: battle.spoils }
+            : {}),
         };
       }),
       /** Pacts between two empires: public, with the announced end if there is one. */

@@ -16,6 +16,7 @@ describe("match rules configuration", () => {
       attackMaxPct: 100,
       defensePct: 50,
       surrenderRefundPct: 50,
+      battleSpoilsPct: 70,
       capitalMoveEveryTurns: 3,
       accumAlertPct: 50,
       accumAlertMinTerritories: 3,

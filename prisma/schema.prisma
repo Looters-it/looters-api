@@ -364,6 +364,8 @@ model Battle {
   attackForce       Int
   defenseCost       Int?
   defenseForce      Int?
+  // What the winner of a fought battle received: a share of what the two sides spent.
+  spoils            Int?
   rollAttack        Float?
   rollDefense       Float?
   createdAt         DateTime        @default(now())

@@ -43,6 +43,8 @@ const matchRulesBase = z.strictObject({
   attackMaxPct: pct.default(100),
   defensePct: pct.default(50),
   surrenderRefundPct: pct.default(50),
+  // Share of what the two sides spent on a battle that goes to whoever wins it.
+  battleSpoilsPct: pct.default(70),
 
   // Capital (§2.9) and accumulation alert (§2.8)
   capitalMoveEveryTurns: count.default(3),
