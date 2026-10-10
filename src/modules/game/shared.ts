@@ -98,6 +98,66 @@ export interface LockedTerritory {
   inBattle: boolean;
 }
 
+/** A territory that stands for the capital of an empire: the capital itself, or a second one. */
+export interface Capital {
+  id: string;
+  resources: number;
+  inBattle: boolean;
+  lon: number;
+  lat: number;
+}
+
+/** Where each of the given territories lies: the middle of its municipalities. */
+export async function placesOf(db: Tx | PrismaClient, territoryIds: string[]) {
+  const rows = await db.$queryRaw<{ id: string; lon: number; lat: number }[]>`
+    SELECT tu."territoryId" AS id, avg(u."centroidLon")::float8 AS lon,
+      avg(u."centroidLat")::float8 AS lat
+    FROM "TerritoryUnit" tu JOIN "GeoUnit" u ON u.id = tu."geoUnitId"
+    WHERE tu."territoryId" = ANY(${territoryIds})
+    GROUP BY tu."territoryId"`;
+  return new Map(rows.map((row) => [row.id, { lon: row.lon, lat: row.lat }]));
+}
+
+/** The capitals of an empire: its capital and every second capital it has built. */
+export function capitalsOf(db: Tx | PrismaClient, matchId: string, empireId: string) {
+  return db.$queryRaw<Capital[]>`
+    SELECT t.id, t.resources,
+      EXISTS (SELECT 1 FROM "BattleLock" l WHERE l."territoryId" = t.id) AS "inBattle",
+      avg(u."centroidLon")::float8 AS lon, avg(u."centroidLat")::float8 AS lat
+    FROM "Territory" t
+    JOIN "TerritoryUnit" tu ON tu."territoryId" = t.id
+    JOIN "GeoUnit" u ON u.id = tu."geoUnitId"
+    WHERE t."matchId" = ${matchId} AND t."ownerEmpireId" = ${empireId}
+      AND (t.id = (SELECT "capitalTerritoryId" FROM "Empire" WHERE id = ${empireId})
+        OR EXISTS (SELECT 1 FROM "Structure" s WHERE s."territoryId" = t.id AND s.active
+          AND jsonb_exists(s.data->'effects', 'BACKUP_CAPITAL')))
+    GROUP BY t.id`;
+}
+
+/**
+ * Who pays for an annexation: the own territory beside the municipality, and for what
+ * it lacks the capital nearest to it. Null when the two together cannot afford it, or
+ * the territory is in a battle; a capital in a battle cannot help.
+ */
+export function annexFunding(
+  payer: { id: string; resources: number; inBattle: boolean; lon: number; lat: number },
+  capitals: readonly Capital[],
+  cost: number,
+): { fromPayer: number; fromCapital: number; capitalId: string | null } | null {
+  if (payer.inBattle) return null;
+  if (payer.resources >= cost) return { fromPayer: cost, fromCapital: 0, capitalId: null };
+  // Near enough at the size of a match: degrees, narrowed by the latitude.
+  const narrow = Math.cos((payer.lat * Math.PI) / 180);
+  const apart = (capital: Capital) =>
+    Math.hypot((capital.lon - payer.lon) * narrow, capital.lat - payer.lat);
+  const nearest = capitals
+    .filter((capital) => capital.id !== payer.id && !capital.inBattle)
+    .sort((a, b) => apart(a) - apart(b) || a.id.localeCompare(b.id))[0];
+  const missing = cost - payer.resources;
+  if (!nearest || nearest.resources < missing) return null;
+  return { fromPayer: payer.resources, fromCapital: missing, capitalId: nearest.id };
+}
+
 /**
  * Locks territories, always in id order so that two actions touching the
  * same ones cannot deadlock. Whatever reads or changes the resources of a

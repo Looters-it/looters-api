@@ -203,22 +203,22 @@ describe.skipIf(!url)("bots", () => {
     // No new bot this time: only the one there plays.
     await prisma.match.update({
       where: { id: matchId },
-      data: { config: { ...DEFAULT_MATCH_RULES, botsEnabled: true, botsMax: 1 } },
+      data: { config: { ...DEFAULT_MATCH_RULES, annexPerTurn: 1, botsEnabled: true, botsMax: 1 } },
     });
     const unitsOf = async () => (await bots())[0]?.units ?? 0;
     expect(await unitsOf()).toBe(1);
 
     await app.bots.playTurn(matchId);
     // One annexation per turn is the rule of the match, for a bot as for anyone.
-    expect(await unitsOf()).toBe(1 + DEFAULT_MATCH_RULES.annexPerTurn);
+    expect(await unitsOf()).toBe(2);
     await app.bots.playTurn(matchId);
-    expect(await unitsOf()).toBe(1 + DEFAULT_MATCH_RULES.annexPerTurn);
+    expect(await unitsOf()).toBe(2);
 
     // The next turn it grows again.
     await prisma.empire.updateMany({ where: { matchId }, data: { annexedThisTurn: 0 } });
     await prisma.match.update({ where: { id: matchId }, data: { currentTurn: 6 } });
     await app.bots.playTurn(matchId);
-    expect(await unitsOf()).toBe(1 + 2 * DEFAULT_MATCH_RULES.annexPerTurn);
+    expect(await unitsOf()).toBe(3);
   });
 
   it("answers an attack on its own, and attacks through the same rules as a player", async () => {

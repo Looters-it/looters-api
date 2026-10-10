@@ -180,6 +180,13 @@ export class BattleService {
     try {
       incoming = await this.prisma.$transaction(async (tx) => {
         const { match, empire, rules } = await acting(tx, matchId, viewer, body.turn, "ACTION");
+        // The empire is locked: its attacks of this turn are counted one at a time.
+        const declared = await tx.battle.count({
+          where: { matchId, attackerEmpireId: empire.id, turn: match.currentTurn },
+        });
+        if (declared >= rules.attacksPerTurn) {
+          throw conflict("ATTACK_LIMIT", "No attacks left this turn");
+        }
         const { target, defender, sources, plan } = await this.plan(
           tx,
           matchId,

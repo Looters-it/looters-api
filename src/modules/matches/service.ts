@@ -992,6 +992,15 @@ export class MatchService {
             empireId: mine.id,
             /** Annexations still available this turn. */
             annexLeft: Math.max(0, rules.annexPerTurn - mine.annexedThisTurn),
+            /** Attacks still available this turn. */
+            attacksLeft: Math.max(
+              0,
+              rules.attacksPerTurn -
+                data.battles.filter(
+                  (battle) =>
+                    battle.attackerEmpireId === mine.id && battle.turn === match.currentTurn,
+                ).length,
+            ),
             /** What the empire earns at the end of this turn. */
             turnValue: turnIncome(rules, unitsOf(mine.id)),
             allocationMode: mine.allocationMode,

@@ -47,6 +47,7 @@ interface Battle {
 interface State {
   territories: { id: string; name: string; resources: number | null; battleId: string | null }[];
   battles: Battle[];
+  me?: { attacksLeft: number };
 }
 
 describe.skipIf(!url)("battles", () => {
@@ -214,6 +215,24 @@ describe.skipIf(!url)("battles", () => {
       );
     });
 
+    it("allows as many attacks in a turn as the match says", async () => {
+      const match = await prisma.match.findUniqueOrThrow({ where: { id: matchId } });
+      await prisma.match.update({
+        where: { id: matchId },
+        data: { config: { ...(match.config as object), attacksPerTurn: 1 } },
+      });
+      const left = async () => (await state("anna")).me?.attacksLeft;
+      expect(await left()).toBe(1);
+      expect((await attack("anna", 3, [2])).statusCode).toBe(201);
+      expect(await left()).toBe(0);
+      // The one attack of the turn is spent, whatever comes of it.
+      await prisma.battle.updateMany({ data: { status: "RESOLVED", outcome: "DEFENDER_WON" } });
+      await prisma.battleLock.deleteMany({});
+      expect(errorCode(await attack("anna", 3, [2]))).toBe("ATTACK_LIMIT");
+      const targets = await as("anna", "GET", `/api/matches/${matchId}/targets`);
+      expect(targets.json<{ territoryIds: string[] }>().territoryIds).toEqual([]);
+    });
+
     it("gives a player the outlines of their own territories, to balance resources on", async () => {
       const shapes = async (user: string | null) =>
         (await as(user, "GET", `/api/matches/${matchId}/shapes`)).json<{
@@ -309,7 +328,11 @@ describe.skipIf(!url)("battles", () => {
       expect(await annexable()).toEqual([]);
       const bruno = (await territoryOf(3)).ownerEmpireId;
       await prisma.territory.update({ where: { id: target }, data: { ownerEmpireId: null } });
-      // Beside it Anna has only 10, and an annexation costs more.
+      // Beside it Anna has only 10, and an annexation costs more: her capital, which
+      // holds 100, pays what is missing. Not when it has nothing either.
+      expect(await annexable()).toEqual([unit[3]]);
+      const capital = await territoryOf(0);
+      await prisma.territory.update({ where: { id: capital.id }, data: { resources: 0 } });
       expect(await annexable()).toEqual([]);
       const beside = await territoryOf(2);
       await prisma.territory.update({ where: { id: beside.id }, data: { resources: 500 } });
@@ -319,6 +342,10 @@ describe.skipIf(!url)("battles", () => {
       expect(await annexable()).toEqual([]);
       await prisma.empire.updateMany({ where: { matchId }, data: { annexedThisTurn: 0 } });
       await prisma.territory.update({ where: { id: beside.id }, data: { resources: 10 } });
+      await prisma.territory.update({
+        where: { id: capital.id },
+        data: { resources: capital.resources },
+      });
       await prisma.territory.update({ where: { id: target }, data: { ownerEmpireId: bruno } });
       // Nothing for who does not play, and nothing left once it is in a battle.
       expect(await targets(null)).toEqual([]);
@@ -647,6 +674,7 @@ describe.skipIf(!url)("battles", () => {
         }>();
 
       expect((await card("anna", 3)).attack).toEqual({
+        left: 5,
         blocked: null,
         from: [{ territoryId: (await ids([2]))[0], name: "Comune 2", resources: 10, usable: true }],
       });

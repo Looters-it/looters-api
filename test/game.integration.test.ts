@@ -83,6 +83,8 @@ describe.skipIf(!url)("turns, resources and annexations", () => {
       name: "Partita",
       areaIds: [area.id],
       startAt: new Date(Date.now() + 86_400_000).toISOString(),
+      // One annexation a turn: what these tests are written around.
+      config: { annexPerTurn: 1 },
     });
     matchId = created.json<{ id: string }>().id;
     await as("anna", "POST", `/api/matches/${matchId}/join`, {
@@ -236,6 +238,23 @@ describe.skipIf(!url)("turns, resources and annexations", () => {
       expect(loser.annexedThisTurn).toBe(0); // and the annexation of the turn is still available
     });
 
+    it("takes from the nearest capital what the paying territory lacks", async () => {
+      const one = await territoryOf(1);
+      const anna = await prisma.empire.findFirstOrThrow({ where: { name: "Anna" } });
+      await prisma.territory.update({
+        where: { id: one.id },
+        data: { ownerEmpireId: anna.id, resources: 10 },
+      });
+      const capital = await territoryOf(0);
+      const cost = 50;
+
+      // Comune 1 holds 10: the capital adds the rest.
+      expect((await annex("anna", 2, 1)).statusCode).toBe(200);
+      expect((await territoryOf(1)).resources).toBe(0);
+      expect((await territoryOf(0)).resources).toBe(capital.resources - (cost - 10));
+      expect((await territoryOf(2)).ownerEmpireId).toBe(anna.id);
+    });
+
     it("cannot overdraw a territory with simultaneous annexations", async () => {
       // Anna may annex twice this turn, but the capital can afford only one.
       await prisma.match.update({
@@ -256,6 +275,11 @@ describe.skipIf(!url)("turns, resources and annexations", () => {
       });
       await prisma.geoAdjacency.create({ data: { aId: unit[1] ?? 0, bId: unit[3] ?? 0 } });
 
+      // The capital has nothing to add to what Comune 1 lacks.
+      await prisma.territory.update({
+        where: { id: (await territoryOf(0)).id },
+        data: { resources: 0 },
+      });
       // Two targets, both paid by Comune 1, which holds 60.
       const results = await Promise.all([annex("anna", 2, 1), annex("anna", 3, 1)]);
       expect(results.map((r) => r.statusCode).sort()).toEqual([200, 409]);

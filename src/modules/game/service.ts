@@ -7,7 +7,15 @@ import { AppError, notFound } from "../../http/errors.js";
 import type { MatchRules } from "../../rules/config.js";
 import type { MatchService } from "../matches/service.js";
 import { areAllies } from "./alliances.js";
-import { acting, conflict, lockTerritories, neighboursOf } from "./shared.js";
+import {
+  acting,
+  annexFunding,
+  capitalsOf,
+  conflict,
+  lockTerritories,
+  neighboursOf,
+  placesOf,
+} from "./shared.js";
 
 type Viewer = AuthContext | null;
 
@@ -148,7 +156,13 @@ export class GameService {
         )
         .map((structure) => structure.territoryId),
     ];
-    const rows = await this.prisma.$queryRaw<{ id: string }[]>`
+    const declared = await this.prisma.battle.count({
+      where: { matchId, attackerEmpireId: mine.id, turn: match.currentTurn },
+    });
+    const rows =
+      declared >= rules.attacksPerTurn
+        ? []
+        : await this.prisma.$queryRaw<{ id: string }[]>`
       WITH edges AS (
         SELECT "aId" AS x, "bId" AS y FROM "GeoAdjacency"
         UNION ALL SELECT "bId", "aId" FROM "GeoAdjacency"
@@ -168,8 +182,32 @@ export class GameService {
         AND COALESCE(t."protectedUntilTurn", 0) < ${Math.max(match.currentTurn, 1)}
         AND t.id <> ALL(${withEffect("NO_ATTACK_ON")})
         AND NOT EXISTS (SELECT 1 FROM "BattleLock" l WHERE l."territoryId" = t.id)`;
+    // Who can pay for an annexation: alone, or with the capital nearest to it.
+    const payerIds: string[] = [];
+    if (mine.annexedThisTurn < rules.annexPerTurn) {
+      const [own, capitals] = await Promise.all([
+        this.prisma.territory.findMany({
+          where: { matchId, ownerEmpireId: mine.id },
+          select: { id: true, resources: true, battleLock: { select: { battleId: true } } },
+        }),
+        capitalsOf(this.prisma, matchId, mine.id),
+      ]);
+      const places = await placesOf(
+        this.prisma,
+        own.map((territory) => territory.id),
+      );
+      for (const territory of own) {
+        const payer = {
+          id: territory.id,
+          resources: territory.resources,
+          inBattle: territory.battleLock !== null,
+          ...(places.get(territory.id) ?? { lon: 0, lat: 0 }),
+        };
+        if (annexFunding(payer, capitals, rules.annexCost)) payerIds.push(territory.id);
+      }
+    }
     const free =
-      mine.annexedThisTurn >= rules.annexPerTurn
+      payerIds.length === 0
         ? []
         : await this.prisma.$queryRaw<{ id: number }[]>`
       WITH edges AS (
@@ -178,9 +216,7 @@ export class GameService {
       ), payers AS (
         SELECT tu."geoUnitId" AS unit
         FROM "Territory" t JOIN "TerritoryUnit" tu ON tu."territoryId" = t.id
-        WHERE t."matchId" = ${matchId} AND t."ownerEmpireId" = ${mine.id}
-          AND t.resources >= ${rules.annexCost}
-          AND NOT EXISTS (SELECT 1 FROM "BattleLock" l WHERE l."territoryId" = t.id)
+        WHERE t.id = ANY(${payerIds})
       )
       SELECT DISTINCT tu."geoUnitId" AS id
       FROM payers p
@@ -296,6 +332,21 @@ export class GameService {
           battleLock: { select: { battleId: true } },
         },
       });
+      const [capitals, places] = await Promise.all([
+        capitalsOf(this.prisma, matchId, mine.id),
+        placesOf(this.prisma, ids),
+      ]);
+      const fundingOf = (payer: (typeof payers)[number]) =>
+        annexFunding(
+          {
+            id: payer.id,
+            resources: payer.resources,
+            inBattle: payer.battleLock !== null,
+            ...(places.get(payer.id) ?? { lon: 0, lat: 0 }),
+          },
+          capitals,
+          rules.annexCost,
+        );
       annex = {
         cost: rules.annexCost,
         left: Math.max(0, rules.annexPerTurn - mine.annexedThisTurn),
@@ -303,7 +354,9 @@ export class GameService {
           territoryId: payer.id,
           name: payer.name,
           resources: payer.resources,
-          usable: payer.battleLock === null && payer.resources >= rules.annexCost,
+          usable: fundingOf(payer) !== null,
+          /** What the nearest capital adds, when the territory alone cannot pay. */
+          fromCapital: fundingOf(payer)?.fromCapital ?? 0,
         })),
       };
     }
@@ -336,6 +389,14 @@ export class GameService {
             ((structure.data as { effects?: string[] }).effects ?? []).includes(effect),
         );
       attack = {
+        /** Attacks the empire can still declare this turn. */
+        left: Math.max(
+          0,
+          rules.attacksPerTurn -
+            (await this.prisma.battle.count({
+              where: { matchId, attackerEmpireId: mine.id, turn: match.currentTurn },
+            })),
+        ),
         /** Why the territory cannot be attacked now, if so. */
         blocked: isProtected
           ? ("PROTECTED" as const)
@@ -398,8 +459,14 @@ export class GameService {
         throw conflict("TERRITORY_TAKEN", "This municipality belongs to an empire");
       }
 
-      // Locked before it is read: an attack on it that commits meanwhile is seen here.
-      const payer = (await lockTerritories(tx, matchId, [body.payFromTerritoryId]))[0];
+      // Locked before they are read, the capitals that may help with it: an attack on
+      // one of them that commits meanwhile is seen here.
+      const capitals = await capitalsOf(tx, matchId, empire.id);
+      const locked = await lockTerritories(tx, matchId, [
+        body.payFromTerritoryId,
+        ...capitals.map((capital) => capital.id),
+      ]);
+      const payer = locked.find((territory) => territory.id === body.payFromTerritoryId);
       if (payer?.ownerEmpireId !== empire.id) {
         throw conflict("NOT_YOUR_TERRITORY", "You can pay only from your own territories");
       }
@@ -414,12 +481,34 @@ export class GameService {
       // Both updates are conditional, so concurrent requests cannot overdraw a
       // territory or give one municipality to two empires. The loser's whole
       // transaction rolls back: it pays nothing (PROMPT §9 #3).
-      const paid = await tx.territory.updateMany({
-        where: { id: payer.id, resources: { gte: rules.annexCost } },
-        data: { resources: { decrement: rules.annexCost } },
-      });
-      if (paid.count === 0) {
-        throw conflict("NOT_ENOUGH_RESOURCES", "The paying territory cannot afford the annexation");
+      // What the territory lacks comes from the capital nearest to it.
+      const place = (await placesOf(tx, [payer.id])).get(payer.id) ?? { lon: 0, lat: 0 };
+      const funding = annexFunding(
+        { ...payer, ...place },
+        capitals.map((capital) => {
+          const now = locked.find((territory) => territory.id === capital.id);
+          return now ? { ...capital, resources: now.resources, inBattle: now.inBattle } : capital;
+        }),
+        rules.annexCost,
+      );
+      if (!funding) {
+        throw conflict(
+          "NOT_ENOUGH_RESOURCES",
+          "Neither the paying territory nor the nearest capital can afford the annexation",
+        );
+      }
+      for (const [id, amount] of [
+        [payer.id, funding.fromPayer],
+        [funding.capitalId, funding.fromCapital],
+      ] as const) {
+        if (!id || amount === 0) continue;
+        const paid = await tx.territory.updateMany({
+          where: { id, resources: { gte: amount } },
+          data: { resources: { decrement: amount } },
+        });
+        if (paid.count === 0) {
+          throw conflict("NOT_ENOUGH_RESOURCES", "The annexation cannot be paid for any more");
+        }
       }
       // In the proportional split of the income the newcomer weighs like the average of
       // the territories the empire already has, so that it gets a share like theirs.

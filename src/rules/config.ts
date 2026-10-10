@@ -35,9 +35,11 @@ const matchRulesBase = z.strictObject({
 
   // Annexation (§2.3)
   annexCost: count.default(50),
-  annexPerTurn: count.default(1),
+  annexPerTurn: count.default(3),
 
   // Battles (§2.5, §9 #1 #4)
+  /** How many territories an empire may attack in one turn. */
+  attacksPerTurn: count.default(5),
   attackPct: pct.default(50),
   attackStepPct: pct.default(10),
   attackMaxPct: pct.default(100),
