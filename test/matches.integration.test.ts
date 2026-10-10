@@ -659,6 +659,27 @@ describe.skipIf(!url)("matches", () => {
       expect((await app.inject({ url: newUrl })).statusCode).toBe(404);
     });
 
+    it("hands to jobs the player who abandons a match being played, once", async () => {
+      const id = await openMatch();
+      await join("anna", id, unitIds[0] ?? 0, { empire: empire("Anna", EMPIRE_COLORS[0]) });
+      await join("bruno", id, unitIds[1] ?? 0, { empire: empire("Bruno", EMPIRE_COLORS[1]) });
+      // Before the start a player withdraws: there is nothing to abandon yet.
+      expect((await as("anna", "POST", `/api/matches/${id}/abandon`)).json()).toMatchObject({
+        error: { code: "MATCH_NOT_ONGOING" },
+      });
+      await prisma.match.update({ where: { id }, data: { status: "ONGOING", currentTurn: 1 } });
+
+      expect((await as(null, "POST", `/api/matches/${id}/abandon`)).statusCode).toBe(401);
+      expect((await as("carla", "POST", `/api/matches/${id}/abandon`)).json()).toMatchObject({
+        error: { code: "NOT_A_PLAYER" },
+      });
+      expect((await as("anna", "POST", `/api/matches/${id}/abandon`)).statusCode).toBe(202);
+      expect((await as("anna", "POST", `/api/matches/${id}/abandon`)).statusCode).toBe(202);
+      const anna = await prisma.empire.findFirstOrThrow({ where: { matchId: id, name: "Anna" } });
+      const jobs = await prisma.job.findMany({ where: { type: "empire.abandon" } });
+      expect(jobs.map((job) => job.payload)).toEqual([{ matchId: id, empireId: anna.id }]);
+    });
+
     it("lets a player withdraw before the start: the municipality is free again, with a new endowment", async () => {
       const id = await openMatch();
       await join("anna", id, unitIds[0] ?? 0, { empire: empire("Anna", EMPIRE_COLORS[0]) });

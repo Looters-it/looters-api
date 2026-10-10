@@ -153,6 +153,12 @@ export function registerMatchRoutes(app: FastifyInstance, deps: MatchRoutesDeps)
     const auth = await guard.user(request);
     return matches.withdraw(matchParams.parse(request.params).id, auth);
   });
+  // Leaving a match that is being played, for good: `jobs` frees what the empire holds.
+  app.post("/api/matches/:id/abandon", async (request, reply) => {
+    const auth = await guard.user(request);
+    await matches.abandon(matchParams.parse(request.params).id, auth);
+    return reply.status(202).send({ accepted: true });
+  });
   app.patch("/api/matches/:id/empire", async (request) => {
     const auth = await guard.user(request);
     const { id } = matchParams.parse(request.params);

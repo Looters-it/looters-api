@@ -577,6 +577,33 @@ export class MatchService {
   }
 
   /**
+   * A player leaves for good a match that is being played. What follows is the work
+   * of `jobs`, which owns the end of an empire: everything it holds becomes free, the
+   * player stays as a spectator, and the match ends if nobody is left to play it.
+   * Asked twice, it is done once.
+   */
+  async abandon(id: string, viewer: AuthContext) {
+    await this.visible(id, viewer);
+    const match = await this.prisma.match.findUnique({ where: { id }, select: { status: true } });
+    if (!match) throw notFound("Match");
+    if (match.status !== "ONGOING") {
+      throw conflict("MATCH_NOT_ONGOING", "Only a match that is being played can be abandoned");
+    }
+    const empire = await this.prisma.empire.findFirst({
+      where: { matchId: id, userId: viewer.user.id },
+      select: { id: true, status: true },
+    });
+    if (!empire) throw new AppError(403, "NOT_A_PLAYER", "You have no empire in this match");
+    if (empire.status !== "ACTIVE") throw conflict("EMPIRE_FALLEN", "Your empire has fallen");
+    await enqueueJob(
+      this.prisma,
+      "empire.abandon",
+      { matchId: id, empireId: empire.id },
+      { dedupeKey: `empire.abandon:${empire.id}` },
+    );
+  }
+
+  /**
    * Enrols the viewer: the chosen municipality becomes the capital of a new
    * empire. Whoever arrives first gets it (PROMPT §9 #5).
    */

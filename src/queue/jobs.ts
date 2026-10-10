@@ -9,6 +9,7 @@ export interface JobPayloads {
   "geo.process": { uploadId: string };
   "match.start": { matchId: string };
   "turn.close": { matchId: string; turn: number };
+  "empire.abandon": { matchId: string; empireId: string };
 }
 
 export type JobType = keyof JobPayloads;
