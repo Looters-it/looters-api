@@ -159,6 +159,18 @@ export function registerMatchRoutes(app: FastifyInstance, deps: MatchRoutesDeps)
     await matches.abandon(matchParams.parse(request.params).id, auth);
     return reply.status(202).send({ accepted: true });
   });
+  app.post("/api/matches/:id/pause", async (request) => {
+    const auth = await guard.user(request);
+    const { id } = matchParams.parse(request.params);
+    await matches.setPaused(id, true, auth);
+    return matches.state(id, auth);
+  });
+  app.post("/api/matches/:id/resume", async (request) => {
+    const auth = await guard.user(request);
+    const { id } = matchParams.parse(request.params);
+    await matches.setPaused(id, false, auth);
+    return matches.state(id, auth);
+  });
   app.patch("/api/matches/:id/empire", async (request) => {
     const auth = await guard.user(request);
     const { id } = matchParams.parse(request.params);

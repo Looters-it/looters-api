@@ -86,7 +86,8 @@ export class BotService {
 
   private async runningWithBots(matchId: string) {
     const match = await this.prisma.match.findUnique({ where: { id: matchId } });
-    if (match?.status !== "ONGOING") return null;
+    // A paused match waits: the bots play the turn again when it is resumed.
+    if (match?.status !== "ONGOING" || match.pausedAt) return null;
     const rules = rulesOf(match);
     return rules.botsEnabled ? { match, rules } : null;
   }
@@ -154,9 +155,9 @@ export class BotService {
       // The turn went by while the others were moving: the rest belongs to the next.
       const now = await this.prisma.match.findUnique({
         where: { id: matchId },
-        select: { currentTurn: true, status: true },
+        select: { currentTurn: true, status: true, pausedAt: true },
       });
-      if (now?.status !== "ONGOING" || now.currentTurn !== turn) return;
+      if (now?.status !== "ONGOING" || now.currentTurn !== turn || now.pausedAt) return;
       try {
         await this.act(matchId, bot);
       } catch (error) {

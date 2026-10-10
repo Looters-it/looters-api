@@ -54,6 +54,7 @@ const summarySelect = {
   turnHours: true,
   currentTurn: true,
   turnEndsAt: true,
+  pausedAt: true,
   finishedAt: true,
   winnerEmpireId: true,
   winnerEmpireIds: true,
@@ -83,6 +84,8 @@ function summary(row: SummaryRow, viewer: Viewer) {
     turnEndsAt: row.turnEndsAt,
     /** Until then the turn is in its preliminary part: see rules/phases. */
     preliminaryEndsAt: row.status === "ONGOING" ? preliminaryEndsAt(row) : null,
+    /** Since when the match is paused, if it is: the clock of the turn stands still. */
+    pausedAt: row.pausedAt,
     finishedAt: row.finishedAt,
     winnerEmpireId: row.winnerEmpireId,
     /** More than one when the match ended with empires exactly level. */
@@ -604,6 +607,56 @@ export class MatchService {
       { matchId: id, empireId: empire.id },
       { dedupeKey: `empire.abandon:${empire.id}` },
     );
+  }
+
+  /**
+   * Stops or restarts the clock of a single-player match: only who plays it alone can,
+   * since nobody else is kept waiting. While it is paused the turn does not close and
+   * nobody acts, bots included; resumed, the turn ends as much later as the pause lasted.
+   */
+  async setPaused(id: string, paused: boolean, viewer: AuthContext) {
+    await this.visible(id, viewer);
+    await this.prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<Match[]>`SELECT * FROM "Match" WHERE id = ${id} FOR UPDATE`;
+      const match = rows[0];
+      if (!match) throw notFound("Match");
+      if (match.ownerId !== viewer.user.id) {
+        throw new AppError(403, "NOT_THE_OWNER", "Only who created the match can pause it");
+      }
+      if (match.mode !== "SINGLEPLAYER") {
+        throw conflict("NOT_SINGLEPLAYER", "Only a match played alone can be paused");
+      }
+      if (match.status !== "ONGOING" || !match.turnEndsAt) {
+        throw conflict("MATCH_NOT_RUNNING", "The match is not being played");
+      }
+      // Asked twice, done once.
+      const since = match.pausedAt;
+      if (paused === (since !== null)) return;
+      if (paused || since === null) {
+        await tx.match.update({ where: { id }, data: { pausedAt: new Date() } });
+        return;
+      }
+      const turnEndsAt = new Date(
+        match.turnEndsAt.getTime() + Math.max(0, Date.now() - since.getTime()),
+      );
+      await tx.match.update({ where: { id }, data: { pausedAt: null, turnEndsAt } });
+      // The closing of the turn moves with its end. If it already came by during the
+      // pause, and found the match stopped, another one is queued.
+      const key = `turn.close:${id}:${match.currentTurn}`;
+      const moved = await tx.job.updateMany({
+        where: { dedupeKey: key, status: "PENDING" },
+        data: { runAt: turnEndsAt },
+      });
+      if (moved.count === 0) {
+        await enqueueJob(
+          tx,
+          "turn.close",
+          { matchId: id, turn: match.currentTurn },
+          { runAt: turnEndsAt, dedupeKey: `${key}:${turnEndsAt.getTime()}` },
+        );
+      }
+    });
+    this.onChange(id, paused ? "match.paused" : "match.resumed");
   }
 
   /**

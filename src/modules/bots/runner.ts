@@ -1,7 +1,7 @@
 import type { BotService } from "./service.js";
 
 /** Kinds of change after which the bots of a match have something to do. */
-const TURN_BEGINS = new Set(["turn.closed", "match.started"]);
+const TURN_BEGINS = new Set(["turn.closed", "match.started", "match.resumed"]);
 
 /**
  * Decides when bots act. They play when a turn begins and answer when

@@ -62,6 +62,7 @@ export async function acting(
   if (match.status !== "ONGOING") {
     throw conflict("MATCH_NOT_RUNNING", "The match is not being played");
   }
+  if (match.pausedAt) throw conflict("MATCH_PAUSED", "The match is paused");
   if (decidedInTurn !== undefined && match.currentTurn !== decidedInTurn) {
     throw conflict("TURN_CHANGED", "The turn has changed: look at the map again");
   }

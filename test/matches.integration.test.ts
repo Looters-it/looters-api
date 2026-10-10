@@ -256,7 +256,7 @@ describe.skipIf(!url)("matches", () => {
       const rush = await draft({ pace: "RUSH", turnHours: 12 });
       expect((await summary("anna", rush)).json()).toMatchObject({
         pace: "RUSH",
-        turnHours: expect.closeTo(60 / 3600, 6),
+        turnHours: expect.closeTo(60 / 3600, 6) as number,
       });
       // A normal match may be twice as fast, and no faster.
       const fast = await draft({ turnHours: 30 / 3600 });
@@ -678,6 +678,63 @@ describe.skipIf(!url)("matches", () => {
       const anna = await prisma.empire.findFirstOrThrow({ where: { matchId: id, name: "Anna" } });
       const jobs = await prisma.job.findMany({ where: { type: "empire.abandon" } });
       expect(jobs.map((job) => job.payload)).toEqual([{ matchId: id, empireId: anna.id }]);
+    });
+
+    it("pauses a match played alone: nobody acts, and the turn ends as much later as the pause lasted", async () => {
+      const shared = await openMatch();
+      await prisma.match.update({
+        where: { id: shared },
+        data: { status: "ONGOING", currentTurn: 1, turnEndsAt: new Date(Date.now() + 60_000) },
+      });
+      expect((await as("anna", "POST", `/api/matches/${shared}/pause`)).json()).toMatchObject({
+        error: { code: "NOT_SINGLEPLAYER" },
+      });
+
+      const id = await draft({ mode: "SINGLEPLAYER" });
+      await join("anna", id, unitIds[0] ?? 0, { empire: empire("Anna", EMPIRE_COLORS[0]) });
+      const turnEndsAt = new Date(Date.now() + 60_000);
+      await prisma.match.update({
+        where: { id },
+        data: { status: "ONGOING", currentTurn: 3, turnEndsAt },
+      });
+      await prisma.job.create({
+        data: {
+          type: "turn.close",
+          payload: { matchId: id, turn: 3 },
+          runAt: turnEndsAt,
+          dedupeKey: `turn.close:${id}:3`,
+        },
+      });
+
+      const paused = await as("anna", "POST", `/api/matches/${id}/pause`);
+      expect(paused.statusCode, paused.body).toBe(200);
+      expect(paused.json<{ match: { pausedAt: string | null } }>().match.pausedAt).not.toBeNull();
+      expect(
+        (
+          await as("anna", "POST", `/api/matches/${id}/capital`, { territoryId: "x", turn: 3 })
+        ).json(),
+      ).toMatchObject({ error: { code: "MATCH_PAUSED" } });
+
+      // Stopped a while ago: resumed, the turn and its closing move forward by as much.
+      await prisma.match.update({
+        where: { id },
+        data: { pausedAt: new Date(Date.now() - 20_000) },
+      });
+      const resumed = await as("anna", "POST", `/api/matches/${id}/resume`);
+      expect(resumed.statusCode, resumed.body).toBe(200);
+      const match = await prisma.match.findUniqueOrThrow({ where: { id } });
+      expect(match.pausedAt).toBeNull();
+      const moved = (match.turnEndsAt?.getTime() ?? 0) - turnEndsAt.getTime();
+      expect(moved).toBeGreaterThanOrEqual(20_000);
+      expect(moved).toBeLessThan(25_000);
+      const jobs = await prisma.job.findMany({ where: { type: "turn.close" } });
+      expect(jobs.map((job) => job.runAt)).toEqual([match.turnEndsAt]);
+
+      // The closing came by during the pause and found the match stopped: another is queued.
+      await prisma.job.updateMany({ data: { status: "DONE" } });
+      await as("anna", "POST", `/api/matches/${id}/pause`);
+      await as("anna", "POST", `/api/matches/${id}/resume`);
+      expect(await prisma.job.count({ where: { type: "turn.close", status: "PENDING" } })).toBe(1);
     });
 
     it("lets a player withdraw before the start: the municipality is free again, with a new endowment", async () => {

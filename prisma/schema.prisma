@@ -224,6 +224,8 @@ model Match {
   turnHours      Float          @default(24)
   currentTurn    Int            @default(0)
   turnEndsAt     DateTime?
+  // Set while a single-player match is paused: the turn does not close, nobody acts.
+  pausedAt       DateTime?
   // Full rules configuration, materialised at creation (see src/rules/config.ts).
   config         Json
   winnerEmpireId String?
