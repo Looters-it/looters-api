@@ -241,6 +241,24 @@ describe.skipIf(!url)("battles", () => {
       expect(await targets("anna")).not.toContain(target);
     });
 
+    it("draws the front of an open battle: the border between target and sources", async () => {
+      const fronts = async () =>
+        (await as(null, "GET", `/api/matches/${matchId}/fronts`)).json<{
+          features: { id: string; geometry: { type: string; coordinates: unknown[] } }[];
+        }>().features;
+      expect(await fronts()).toEqual([]);
+      expect((await attack("anna", 3, [2])).statusCode).toBe(201);
+      const battle = await prisma.battle.findFirstOrThrow();
+      const drawn = await fronts();
+      expect(drawn).toHaveLength(1);
+      expect(drawn[0]?.id).toBe(battle.id);
+      expect(drawn[0]?.geometry.type).toMatch(/LineString$/);
+      expect(drawn[0]?.geometry.coordinates.length).toBeGreaterThan(0);
+      // Once the battle is over there is no front left.
+      await prisma.battle.update({ where: { id: battle.id }, data: { status: "RESOLVED" } });
+      expect(await fronts()).toEqual([]);
+    });
+
     it("joins the strength of several territories at a progressive cost", async () => {
       // Make Comune 1 a neighbour of the target as well.
       await prisma.geoAdjacency.create({ data: { aId: unit[1] ?? 0, bId: unit[3] ?? 0 } });

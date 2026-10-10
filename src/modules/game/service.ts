@@ -39,6 +39,9 @@ export const allocationRuleBody = z.strictObject({
   weights: z.record(z.string().min(1), z.number().int().min(0).max(1_000_000)).optional(),
 });
 
+/** How far from a territory its neighbour's border still counts as shared: some sixty metres. */
+const FRONT_REACH_DEGREES = 0.0006;
+
 /**
  * The immediate actions of the game. Each one runs in a transaction that
  * holds the match row shared (a closing turn takes it exclusively, so an
@@ -53,6 +56,48 @@ export class GameService {
     private readonly prisma: PrismaClient,
     private readonly matches: MatchService,
   ) {}
+
+  /**
+   * The fronts of the open battles: for each, the stretch of border between the
+   * territory under attack and the territories the attack starts from, as lines
+   * for the map to draw. Battles are public, and so are their fronts.
+   */
+  async fronts(matchId: string, viewer: Viewer) {
+    await this.matches.get(matchId, viewer);
+    // The border of the target that lies along a source: the two outlines rarely share
+    // their points exactly, so a narrow strip around the source says what "along" is.
+    const rows = await this.prisma.$queryRaw<{ battleId: string; line: string | null }[]>`
+      SELECT b.id AS "battleId",
+        ST_AsGeoJSON(ST_LineMerge(ST_Union(ST_CollectionExtract(
+          ST_Intersection(ST_Boundary(target.geom), ST_Buffer(source.geom, ${FRONT_REACH_DEGREES})), 2
+        ))), 5) AS line
+      FROM "Battle" b
+      JOIN "BattleSource" s ON s."battleId" = b.id
+      JOIN "TerritoryUnit" tt ON tt."territoryId" = b."targetTerritoryId"
+      JOIN "TerritoryUnit" ts ON ts."territoryId" = s."territoryId"
+      JOIN "GeoAdjacency" a
+        ON (a."aId" = tt."geoUnitId" AND a."bId" = ts."geoUnitId")
+        OR (a."bId" = tt."geoUnitId" AND a."aId" = ts."geoUnitId")
+      JOIN "GeoUnit" target ON target.id = tt."geoUnitId"
+      JOIN "GeoUnit" source ON source.id = ts."geoUnitId"
+      WHERE b."matchId" = ${matchId} AND b.status = 'OPEN'
+      GROUP BY b.id`;
+    return {
+      type: "FeatureCollection" as const,
+      features: rows.flatMap((row) =>
+        row.line
+          ? [
+              {
+                type: "Feature" as const,
+                id: row.battleId,
+                geometry: JSON.parse(row.line) as unknown,
+                properties: { battleId: row.battleId },
+              },
+            ]
+          : [],
+      ),
+    };
+  }
 
   /**
    * The territories the viewer could attack right now: those of other empires
