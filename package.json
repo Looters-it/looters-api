@@ -21,7 +21,8 @@
     "db:deploy": "prisma migrate deploy",
     "db:generate": "prisma generate",
     "load": "tsx --env-file-if-exists=.env scripts/load-test.ts",
-    "load:duels": "tsx --env-file-if-exists=.env scripts/duel-load.ts"
+    "load:duels": "tsx --env-file-if-exists=.env scripts/duel-load.ts",
+    "regions": "tsx --env-file-if-exists=.env scripts/split-italy-regions.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.2",
