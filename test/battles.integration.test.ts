@@ -234,6 +234,25 @@ describe.skipIf(!url)("battles", () => {
         expect(card.attack?.blocked, territory.name).toBeNull();
         expect(card.attack?.from.some((source) => source.usable)).toBe(true);
       }
+      // With them, what she can annex: the free municipalities beside one of hers that can pay.
+      const annexable = async () =>
+        (await as("anna", "GET", `/api/matches/${matchId}/targets`)).json<{
+          annexUnitIds: number[];
+        }>().annexUnitIds;
+      expect(await annexable()).toEqual([]);
+      const bruno = (await territoryOf(3)).ownerEmpireId;
+      await prisma.territory.update({ where: { id: target }, data: { ownerEmpireId: null } });
+      // Beside it Anna has only 10, and an annexation costs more.
+      expect(await annexable()).toEqual([]);
+      const beside = await territoryOf(2);
+      await prisma.territory.update({ where: { id: beside.id }, data: { resources: 500 } });
+      expect(await annexable()).toEqual([unit[3]]);
+      // None once the annexations of the turn are used up.
+      await prisma.empire.updateMany({ where: { matchId }, data: { annexedThisTurn: 99 } });
+      expect(await annexable()).toEqual([]);
+      await prisma.empire.updateMany({ where: { matchId }, data: { annexedThisTurn: 0 } });
+      await prisma.territory.update({ where: { id: beside.id }, data: { resources: 10 } });
+      await prisma.territory.update({ where: { id: target }, data: { ownerEmpireId: bruno } });
       // Nothing for who does not play, and nothing left once it is in a battle.
       expect(await targets(null)).toEqual([]);
       expect((await attack("anna", 3, [2])).statusCode).toBe(201);

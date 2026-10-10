@@ -105,9 +105,14 @@ export class GameService {
    * that touch one of theirs, are not allied, protected, blocked or already in
    * a battle, and that at least one of their own territories can strike from.
    * It is what the unit card says one territory at a time, for the whole border
-   * at once: the map marks them. Empty for who is not playing.
+   * at once: the map marks them. With them, the free municipalities that can be annexed
+   * now: they touch an own territory that can pay, and the turn still allows it.
+   * Empty for who is not playing.
    */
-  async targets(matchId: string, viewer: Viewer): Promise<{ territoryIds: string[] }> {
+  async targets(
+    matchId: string,
+    viewer: Viewer,
+  ): Promise<{ territoryIds: string[]; annexUnitIds: number[] }> {
     const match = await this.matches.get(matchId, viewer);
     const mine = viewer
       ? await this.prisma.empire.findFirst({
@@ -116,8 +121,9 @@ export class GameService {
       : null;
     // Nothing is attacked while the turn is in its preliminary part.
     if (!mine || match.status !== "ONGOING" || phaseOf(match) !== "ACTION") {
-      return { territoryIds: [] };
+      return { territoryIds: [], annexUnitIds: [] };
     }
+    const rules = match.config as MatchRules;
 
     const [alliances, structures] = await Promise.all([
       this.prisma.alliance.findMany({
@@ -162,7 +168,31 @@ export class GameService {
         AND COALESCE(t."protectedUntilTurn", 0) < ${Math.max(match.currentTurn, 1)}
         AND t.id <> ALL(${withEffect("NO_ATTACK_ON")})
         AND NOT EXISTS (SELECT 1 FROM "BattleLock" l WHERE l."territoryId" = t.id)`;
-    return { territoryIds: rows.map((row) => row.id) };
+    const free =
+      mine.annexedThisTurn >= rules.annexPerTurn
+        ? []
+        : await this.prisma.$queryRaw<{ id: number }[]>`
+      WITH edges AS (
+        SELECT "aId" AS x, "bId" AS y FROM "GeoAdjacency"
+        UNION ALL SELECT "bId", "aId" FROM "GeoAdjacency"
+      ), payers AS (
+        SELECT tu."geoUnitId" AS unit
+        FROM "Territory" t JOIN "TerritoryUnit" tu ON tu."territoryId" = t.id
+        WHERE t."matchId" = ${matchId} AND t."ownerEmpireId" = ${mine.id}
+          AND t.resources >= ${rules.annexCost}
+          AND NOT EXISTS (SELECT 1 FROM "BattleLock" l WHERE l."territoryId" = t.id)
+      )
+      SELECT DISTINCT tu."geoUnitId" AS id
+      FROM payers p
+      JOIN edges e ON e.x = p.unit
+      JOIN "TerritoryUnit" tu ON tu."matchId" = ${matchId} AND tu."geoUnitId" = e.y
+      JOIN "Territory" t ON t.id = tu."territoryId"
+      WHERE t."ownerEmpireId" IS NULL`;
+    return {
+      territoryIds: rows.map((row) => row.id),
+      // By municipality, not by territory: the free ones are not in the state of the match.
+      annexUnitIds: free.map((row) => row.id),
+    };
   }
 
   /**
