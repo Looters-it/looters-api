@@ -3,7 +3,7 @@ import { Prisma, type Match, type PrismaClient } from "@prisma/client";
 import type { AuthContext } from "../../auth/sessions.js";
 import { recordEvent } from "../../events/events.js";
 import { AppError, forbidden, notFound } from "../../http/errors.js";
-import { enqueueJob } from "../../queue/jobs.js";
+import { enqueueJob, moveTurnClose } from "../../queue/jobs.js";
 import { matchRulesSchema, resolveMatchRules, type MatchRules } from "../../rules/config.js";
 import { drawHiddenResources, secureRandom, type Random } from "../../rules/hidden-resources.js";
 import { costOf } from "../../rules/attack.js";
@@ -640,21 +640,8 @@ export class MatchService {
         match.turnEndsAt.getTime() + Math.max(0, Date.now() - since.getTime()),
       );
       await tx.match.update({ where: { id }, data: { pausedAt: null, turnEndsAt } });
-      // The closing of the turn moves with its end. If it already came by during the
-      // pause, and found the match stopped, another one is queued.
-      const key = `turn.close:${id}:${match.currentTurn}`;
-      const moved = await tx.job.updateMany({
-        where: { dedupeKey: key, status: "PENDING" },
-        data: { runAt: turnEndsAt },
-      });
-      if (moved.count === 0) {
-        await enqueueJob(
-          tx,
-          "turn.close",
-          { matchId: id, turn: match.currentTurn },
-          { runAt: turnEndsAt, dedupeKey: `${key}:${turnEndsAt.getTime()}` },
-        );
-      }
+      // The closing of the turn moves with its end.
+      await moveTurnClose(tx, id, match.currentTurn, turnEndsAt);
     });
     this.onChange(id, paused ? "match.paused" : "match.resumed");
   }

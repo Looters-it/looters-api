@@ -24,6 +24,26 @@ export interface EnqueueOptions {
 type Db = PrismaClient | Prisma.TransactionClient;
 
 /**
+ * Moves the closing of a turn to the new moment the turn ends. If the job already came
+ * by, and left the turn open because it was not time, another one is queued.
+ */
+export async function moveTurnClose(db: Db, matchId: string, turn: number, at: Date) {
+  const key = `turn.close:${matchId}:${turn}`;
+  const moved = await db.job.updateMany({
+    where: { type: "turn.close", status: "PENDING", dedupeKey: { startsWith: key } },
+    data: { runAt: at },
+  });
+  if (moved.count === 0) {
+    await enqueueJob(
+      db,
+      "turn.close",
+      { matchId, turn },
+      { runAt: at, dedupeKey: `${key}:${at.getTime()}` },
+    );
+  }
+}
+
+/**
  * Adds a job to the queue table read by `jobs`. Pass a transaction client to
  * enqueue atomically with the change that needs the job.
  * Returns false when a job with the same dedupeKey already exists.

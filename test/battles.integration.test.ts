@@ -214,6 +214,49 @@ describe.skipIf(!url)("battles", () => {
       );
     });
 
+    it("makes the turn longer when an attack is declared in its last seconds", async () => {
+      // Straight to the app: the helper would set the clock of the turn by itself.
+      const strike = async (target: number, from: number) =>
+        app.inject({
+          method: "POST",
+          url: `/api/matches/${matchId}/attacks`,
+          headers: { cookie: cookies.anna ?? "" },
+          payload: {
+            targetGeoUnitId: unit[target],
+            fromTerritoryIds: await ids([from]),
+            turn: 2,
+          },
+        });
+      const endsAt = async () =>
+        (await prisma.match.findUniqueOrThrow({ where: { id: matchId } })).turnEndsAt?.getTime() ??
+        0;
+      const close = (at: Date) =>
+        prisma.job.create({
+          data: {
+            type: "turn.close",
+            payload: { matchId, turn: 2 },
+            runAt: at,
+            dedupeKey: `turn.close:${matchId}:2`,
+          },
+        });
+
+      // With time left, nothing changes.
+      const far = new Date(Date.now() + 20_000);
+      await prisma.match.update({ where: { id: matchId }, data: { turnEndsAt: far } });
+      await close(far);
+      expect((await strike(3, 2)).statusCode).toBe(201);
+      expect(await endsAt()).toBe(far.getTime());
+
+      // Three seconds from the end: ten more, and the closing of the turn moves with it.
+      await prisma.battle.deleteMany({});
+      const near = new Date(Date.now() + 3_000);
+      await prisma.match.update({ where: { id: matchId }, data: { turnEndsAt: near } });
+      expect((await strike(3, 2)).statusCode).toBe(201);
+      expect(await endsAt()).toBe(near.getTime() + 10_000);
+      const jobs = await prisma.job.findMany({ where: { type: "turn.close" } });
+      expect(jobs.map((job) => job.runAt.getTime())).toEqual([near.getTime() + 10_000]);
+    });
+
     it("lists the territories a player can attack now: the map marks them", async () => {
       const targets = async (user: string | null) =>
         (await as(user, "GET", `/api/matches/${matchId}/targets`)).json<{

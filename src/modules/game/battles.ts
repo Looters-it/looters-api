@@ -7,6 +7,7 @@ import type { MatchRules } from "../../rules/config.js";
 import type { MatchService } from "../matches/service.js";
 import { areAllies } from "./alliances.js";
 import { acting, conflict, lockTerritories, neighboursOf } from "./shared.js";
+import { moveTurnClose } from "../../queue/jobs.js";
 
 export const attackBody = z.strictObject({
   /** A municipality of the enemy territory to attack. */
@@ -26,6 +27,10 @@ export const respondBody = z.strictObject({
 export interface ResolutionQueue {
   requestResolution(message: { battleId: string; matchId: string }): Promise<void>;
 }
+
+/** An attack declared this close to the end of a turn makes the turn this much longer. */
+export const LATE_ATTACK_WINDOW_SECONDS = 5;
+export const LATE_ATTACK_EXTENDS_SECONDS = 10;
 
 /**
  * Battles between empires (PROMPT §2.5). The api validates and records the
@@ -226,9 +231,31 @@ export class BattleService {
       }
       throw error;
     }
+    await this.extendTurn(matchId, body.turn);
     this.onIncoming(matchId, incoming.defenderUserId, incoming.battleId);
     this.onChange(matchId, "battles");
     return this.matches.state(matchId, viewer);
+  }
+
+  /**
+   * An attack declared in the last seconds of a turn makes the turn longer: whoever is
+   * attacked must have the time to answer. Done after the attack is recorded, in one
+   * statement: of two attacks at the same instant only the first finds the turn about
+   * to end, and a turn that closed in the meantime is left alone.
+   */
+  private async extendTurn(matchId: string, turn: number) {
+    await this.prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<{ turnEndsAt: Date }[]>`
+        UPDATE "Match"
+        SET "turnEndsAt" = "turnEndsAt" + make_interval(secs => ${LATE_ATTACK_EXTENDS_SECONDS})
+        WHERE id = ${matchId} AND status = 'ONGOING' AND "pausedAt" IS NULL
+          AND "currentTurn" = ${turn}
+          AND "turnEndsAt" - (now() AT TIME ZONE 'UTC')
+            <= make_interval(secs => ${LATE_ATTACK_WINDOW_SECONDS})
+        RETURNING "turnEndsAt"`;
+      const end = rows[0]?.turnEndsAt;
+      if (end) await moveTurnClose(tx, matchId, turn, end);
+    });
   }
 
   /**
