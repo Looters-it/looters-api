@@ -41,6 +41,10 @@ export function registerGameRoutes(
     game.fronts(matchParams.parse(request.params).id, await guard.optional(request)),
   );
 
+  app.get("/api/matches/:id/shapes", async (request) =>
+    game.shapes(matchParams.parse(request.params).id, await guard.optional(request)),
+  );
+
   app.get("/api/matches/:id/targets", async (request) =>
     game.targets(matchParams.parse(request.params).id, await guard.optional(request)),
   );

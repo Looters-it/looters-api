@@ -196,6 +196,40 @@ export class GameService {
   }
 
   /**
+   * The outline of each territory of the viewer's empire, with a point inside it: the
+   * small map their resources are balanced on. Nothing that is not already on the map.
+   */
+  async shapes(matchId: string, viewer: Viewer) {
+    await this.matches.get(matchId, viewer);
+    const mine = viewer
+      ? await this.prisma.empire.findFirst({
+          where: { matchId, userId: viewer.user.id, status: "ACTIVE" },
+        })
+      : null;
+    if (!mine) return { territories: [] };
+    const rows = await this.prisma.$queryRaw<
+      { id: string; shape: string; lon: number; lat: number }[]
+    >`
+      SELECT t.id,
+        ST_AsGeoJSON(ST_Union(u."geomSimple"), 4) AS shape,
+        ST_X(ST_PointOnSurface(ST_Union(u."geomSimple"))) AS lon,
+        ST_Y(ST_PointOnSurface(ST_Union(u."geomSimple"))) AS lat
+      FROM "Territory" t
+      JOIN "TerritoryUnit" tu ON tu."territoryId" = t.id
+      JOIN "GeoUnit" u ON u.id = tu."geoUnitId"
+      WHERE t."matchId" = ${matchId} AND t."ownerEmpireId" = ${mine.id}
+      GROUP BY t.id`;
+    return {
+      territories: rows.map((row) => ({
+        id: row.id,
+        geometry: JSON.parse(row.shape) as unknown,
+        lon: row.lon,
+        lat: row.lat,
+      })),
+    };
+  }
+
+  /**
    * The card of a municipality: who owns it, its neighbours and, for a
    * player looking at a free neighbour, how it can be annexed.
    */

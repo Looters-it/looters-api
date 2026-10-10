@@ -214,6 +214,21 @@ describe.skipIf(!url)("battles", () => {
       );
     });
 
+    it("gives a player the outlines of their own territories, to balance resources on", async () => {
+      const shapes = async (user: string | null) =>
+        (await as(user, "GET", `/api/matches/${matchId}/shapes`)).json<{
+          territories: { id: string; geometry: { type: string }; lon: number; lat: number }[];
+        }>().territories;
+      const anna = await shapes("anna");
+      expect(anna.map((shape) => shape.id).sort()).toEqual((await ids([0, 1, 2])).sort());
+      for (const shape of anna) {
+        expect(shape.geometry.type).toMatch(/Polygon$/);
+        expect(shape.lon).toBeGreaterThan(9);
+        expect(shape.lat).toBeGreaterThan(45);
+      }
+      expect(await shapes(null)).toEqual([]);
+    });
+
     it("makes the turn longer when an attack is declared in its last seconds", async () => {
       // Straight to the app: the helper would set the clock of the turn by itself.
       const strike = async (target: number, from: number) =>
