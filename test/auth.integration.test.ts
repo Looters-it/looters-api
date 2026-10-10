@@ -151,6 +151,23 @@ describe.skipIf(!url)("authentication", () => {
     });
   });
 
+  describe("public profile", () => {
+    it("says the name and since when, never the email", async () => {
+      await start();
+      await post("/api/auth/register", {
+        username: "Elena",
+        email: "elena@example.test",
+        password: "password-123",
+      });
+      const response = await app.inject({ url: "/api/users/elena" });
+      expect(response.statusCode).toBe(200);
+      const body = response.json<Record<string, unknown>>();
+      expect(body).toMatchObject({ username: "Elena", matches: 0 });
+      expect(Object.keys(body).sort()).toEqual(["createdAt", "matches", "username"]);
+      expect((await app.inject({ url: "/api/users/nessuno" })).statusCode).toBe(404);
+    });
+  });
+
   describe("registration", () => {
     it("tells a programme that fills the hidden field that it registered, and creates nothing", async () => {
       await start();

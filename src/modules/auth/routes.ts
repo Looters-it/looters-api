@@ -119,6 +119,18 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthRoutesDeps): 
     return { available: taken === null };
   });
 
+  // What anybody may know of a player: the name, since when, how many matches. Never
+  // the email. A bot is a user nobody can be, so it has no page.
+  app.get("/api/users/:username", async (request) => {
+    const { username } = z.object({ username: z.string().min(1).max(64) }).parse(request.params);
+    const user = await prisma.user.findFirst({
+      where: { username: { equals: username, mode: "insensitive" }, isBot: false },
+      select: { username: true, createdAt: true, _count: { select: { empires: true } } },
+    });
+    if (!user) throw new AppError(404, "NOT_FOUND", "No such player");
+    return { username: user.username, createdAt: user.createdAt, matches: user._count.empires };
+  });
+
   // Login is by username only: an email is never accepted as identifier.
   app.post("/api/auth/login", async (request, reply) => {
     const body = loginBody.parse(request.body);
