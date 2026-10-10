@@ -8,12 +8,13 @@ const name = z.string().trim().min(3).max(60);
 const startAt = z.coerce.date();
 const maxDays = z.number().int().min(1).max(3650).nullable();
 const maxPlayers = z.number().int().min(2).max(MAX_PLAYERS_LIMIT);
-/** How long a turn of a rush match lasts. */
-export const RUSH_TURN_SECONDS = 30;
-// From thirty seconds up: a normal match may be as fast as a rush one.
+/** How long a turn of a rush match lasts: thirty seconds to prepare, thirty to act. */
+export const RUSH_TURN_SECONDS = 60;
+/** The shortest turn a normal match may have: faster than a rush one. */
+export const MIN_TURN_SECONDS = 30;
 const turnHours = z
   .number()
-  .min(RUSH_TURN_SECONDS / 3600)
+  .min(MIN_TURN_SECONDS / 3600)
   .max(24 * 30);
 const mode = z.enum(["SINGLEPLAYER", "MULTIPLAYER"]);
 const pace = z.enum(["RUSH", "NORMAL"]);
@@ -25,7 +26,7 @@ export const createMatchBody = z.strictObject({
   areaIds,
   /** Alone against bots, or with people online. */
   mode: mode.default("MULTIPLAYER"),
-  /** Rush fixes the turn at thirty seconds; normal takes `turnHours`. */
+  /** Rush fixes the turn at sixty seconds; normal takes `turnHours`. */
   pace: pace.default("NORMAL"),
   /** A single-player match is always private. */
   visibility: visibility.default("PUBLIC"),

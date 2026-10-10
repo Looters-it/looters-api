@@ -252,13 +252,13 @@ describe.skipIf(!url)("matches", () => {
       expect(match.config).toMatchObject({ botsAtStart: 5, botsMax: 5 });
     });
 
-    it("fixes the turn of a rush match at thirty seconds", async () => {
+    it("fixes the turn of a rush match at sixty seconds", async () => {
       const rush = await draft({ pace: "RUSH", turnHours: 12 });
       expect((await summary("anna", rush)).json()).toMatchObject({
         pace: "RUSH",
-        turnHours: 30 / 3600,
+        turnHours: expect.closeTo(60 / 3600, 6),
       });
-      // A normal match may be as fast, and no faster.
+      // A normal match may be twice as fast, and no faster.
       const fast = await draft({ turnHours: 30 / 3600 });
       expect((await summary("anna", fast)).json()).toMatchObject({ pace: "NORMAL" });
       const tooFast = await as("anna", "POST", "/api/matches", {
