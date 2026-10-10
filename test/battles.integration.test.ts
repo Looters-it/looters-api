@@ -217,7 +217,13 @@ describe.skipIf(!url)("battles", () => {
     it("gives a player the outlines of their own territories, to balance resources on", async () => {
       const shapes = async (user: string | null) =>
         (await as(user, "GET", `/api/matches/${matchId}/shapes`)).json<{
-          territories: { id: string; geometry: { type: string }; lon: number; lat: number }[];
+          territories: {
+            id: string;
+            geometry: { type: string };
+            lon: number;
+            lat: number;
+            frontier: boolean;
+          }[];
         }>().territories;
       const anna = await shapes("anna");
       expect(anna.map((shape) => shape.id).sort()).toEqual((await ids([0, 1, 2])).sort());
@@ -226,6 +232,9 @@ describe.skipIf(!url)("battles", () => {
         expect(shape.lon).toBeGreaterThan(9);
         expect(shape.lat).toBeGreaterThan(45);
       }
+      // Of Anna's three in a row only the last touches someone else's.
+      const last = (await territoryOf(2)).id;
+      expect(anna.filter((shape) => shape.frontier).map((shape) => shape.id)).toEqual([last]);
       expect(await shapes(null)).toEqual([]);
     });
 

@@ -208,9 +208,17 @@ export class GameService {
       : null;
     if (!mine) return { territories: [] };
     const rows = await this.prisma.$queryRaw<
-      { id: string; shape: string; lon: number; lat: number }[]
+      { id: string; shape: string; lon: number; lat: number; frontier: boolean }[]
     >`
       SELECT t.id,
+        EXISTS (
+          SELECT 1 FROM "TerritoryUnit" own
+          JOIN "GeoAdjacency" a ON own."geoUnitId" IN (a."aId", a."bId")
+          JOIN "TerritoryUnit" beside ON beside."matchId" = ${matchId}
+            AND beside."geoUnitId" = CASE WHEN a."aId" = own."geoUnitId" THEN a."bId" ELSE a."aId" END
+          JOIN "Territory" n ON n.id = beside."territoryId"
+          WHERE own."territoryId" = t.id AND n."ownerEmpireId" IS DISTINCT FROM ${mine.id}
+        ) AS frontier,
         ST_AsGeoJSON(ST_Union(u."geomSimple"), 4) AS shape,
         ST_X(ST_PointOnSurface(ST_Union(u."geomSimple"))) AS lon,
         ST_Y(ST_PointOnSurface(ST_Union(u."geomSimple"))) AS lat
@@ -225,6 +233,8 @@ export class GameService {
         geometry: JSON.parse(row.shape) as unknown,
         lon: row.lon,
         lat: row.lat,
+        /** It touches something that is not the empire's: where an attack can come from. */
+        frontier: row.frontier,
       })),
     };
   }
