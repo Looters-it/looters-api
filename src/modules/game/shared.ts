@@ -62,11 +62,16 @@ export async function acting(
   if (match.status !== "ONGOING") {
     throw conflict("MATCH_NOT_RUNNING", "The match is not being played");
   }
-  if (match.pausedAt) throw conflict("MATCH_PAUSED", "The match is paused");
+  // A paused match stands still at the moment it was stopped. Who plays it may still put
+  // their own empire in order, if it was stopped in the preliminary part of the turn:
+  // nothing else moves, and nothing that touches the others is done.
+  if (match.pausedAt && phase !== "PRELIMINARY") {
+    throw conflict("MATCH_PAUSED", "The match is paused");
+  }
   if (decidedInTurn !== undefined && match.currentTurn !== decidedInTurn) {
     throw conflict("TURN_CHANGED", "The turn has changed: look at the map again");
   }
-  if (phase !== undefined && phaseOf(match) !== phase) {
+  if (phase !== undefined && phaseOf(match, match.pausedAt ?? new Date()) !== phase) {
     throw conflict(
       "WRONG_PHASE",
       phase === "PRELIMINARY"

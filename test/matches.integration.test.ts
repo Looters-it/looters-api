@@ -709,11 +709,26 @@ describe.skipIf(!url)("matches", () => {
       const paused = await as("anna", "POST", `/api/matches/${id}/pause`);
       expect(paused.statusCode, paused.body).toBe(200);
       expect(paused.json<{ match: { pausedAt: string | null } }>().match.pausedAt).not.toBeNull();
-      expect(
-        (
-          await as("anna", "POST", `/api/matches/${id}/capital`, { territoryId: "x", turn: 3 })
-        ).json(),
-      ).toMatchObject({ error: { code: "MATCH_PAUSED" } });
+      // Stopped in the second part of the turn: nothing is done, of either part.
+      const refused = async (route: string, body: object) =>
+        (await as("anna", "POST", `/api/matches/${id}/${route}`, body)).json<{
+          error?: { code: string };
+        }>().error?.code;
+      const annex = { geoUnitId: unitIds[1], payFromTerritoryId: "x", turn: 3 };
+      expect(await refused("annex", annex)).toBe("MATCH_PAUSED");
+      expect(await refused("capital", { territoryId: "x", turn: 3 })).toBe("WRONG_PHASE");
+      // Stopped in the preliminary part, the empire can still be put in order: the
+      // request gets as far as the territory, which here does not exist.
+      const { turnHours } = await prisma.match.findUniqueOrThrow({ where: { id } });
+      await prisma.match.update({
+        where: { id },
+        data: { turnEndsAt: new Date(Date.now() + turnHours * 3_600_000 - 60_000) },
+      });
+      expect(await refused("capital", { territoryId: "x", turn: 3 })).not.toMatch(
+        /MATCH_PAUSED|WRONG_PHASE/,
+      );
+      expect(await refused("annex", annex)).toBe("MATCH_PAUSED");
+      await prisma.match.update({ where: { id }, data: { turnEndsAt } });
 
       // Stopped a while ago: resumed, the turn and its closing move forward by as much.
       await prisma.match.update({
