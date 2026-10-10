@@ -55,6 +55,68 @@ export class GameService {
   ) {}
 
   /**
+   * The territories the viewer could attack right now: those of other empires
+   * that touch one of theirs, are not allied, protected, blocked or already in
+   * a battle, and that at least one of their own territories can strike from.
+   * It is what the unit card says one territory at a time, for the whole border
+   * at once: the map marks them. Empty for who is not playing.
+   */
+  async targets(matchId: string, viewer: Viewer): Promise<{ territoryIds: string[] }> {
+    const match = await this.matches.get(matchId, viewer);
+    const mine = viewer
+      ? await this.prisma.empire.findFirst({
+          where: { matchId, userId: viewer.user.id, status: "ACTIVE" },
+        })
+      : null;
+    if (!mine || match.status !== "ONGOING") return { territoryIds: [] };
+
+    const [alliances, structures] = await Promise.all([
+      this.prisma.alliance.findMany({
+        where: { matchId, OR: [{ aEmpireId: mine.id }, { bEmpireId: mine.id }] },
+        select: { aEmpireId: true, bEmpireId: true },
+      }),
+      this.prisma.structure.findMany({
+        where: { matchId, active: true },
+        select: { territoryId: true, data: true },
+      }),
+    ]);
+    const spared = [
+      mine.id,
+      ...alliances.map((pact) => (pact.aEmpireId === mine.id ? pact.bEmpireId : pact.aEmpireId)),
+    ];
+    const withEffect = (effect: string) => [
+      // Never an empty list: it is compared against in the query.
+      "",
+      ...structures
+        .filter((structure) =>
+          ((structure.data as { effects?: string[] }).effects ?? []).includes(effect),
+        )
+        .map((structure) => structure.territoryId),
+    ];
+    const rows = await this.prisma.$queryRaw<{ id: string }[]>`
+      WITH edges AS (
+        SELECT "aId" AS x, "bId" AS y FROM "GeoAdjacency"
+        UNION ALL SELECT "bId", "aId" FROM "GeoAdjacency"
+      ), sources AS (
+        SELECT tu."geoUnitId" AS unit
+        FROM "Territory" t JOIN "TerritoryUnit" tu ON tu."territoryId" = t.id
+        WHERE t."matchId" = ${matchId} AND t."ownerEmpireId" = ${mine.id} AND t.resources >= 1
+          AND t.id <> ALL(${withEffect("NO_ATTACK_FROM")})
+          AND NOT EXISTS (SELECT 1 FROM "BattleLock" l WHERE l."territoryId" = t.id)
+      )
+      SELECT DISTINCT t.id
+      FROM sources s
+      JOIN edges e ON e.x = s.unit
+      JOIN "TerritoryUnit" tu ON tu."matchId" = ${matchId} AND tu."geoUnitId" = e.y
+      JOIN "Territory" t ON t.id = tu."territoryId"
+      WHERE t."ownerEmpireId" IS NOT NULL AND t."ownerEmpireId" <> ALL(${spared})
+        AND COALESCE(t."protectedUntilTurn", 0) < ${Math.max(match.currentTurn, 1)}
+        AND t.id <> ALL(${withEffect("NO_ATTACK_ON")})
+        AND NOT EXISTS (SELECT 1 FROM "BattleLock" l WHERE l."territoryId" = t.id)`;
+    return { territoryIds: rows.map((row) => row.id) };
+  }
+
+  /**
    * The card of a municipality: who owns it, its neighbours and, for a
    * player looking at a free neighbour, how it can be annexed.
    */

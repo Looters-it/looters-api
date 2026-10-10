@@ -37,6 +37,10 @@ export function registerGameRoutes(
   alliances: AllianceService,
   guard: AuthGuard,
 ): void {
+  app.get("/api/matches/:id/targets", async (request) =>
+    game.targets(matchParams.parse(request.params).id, await guard.optional(request)),
+  );
+
   app.get("/api/matches/:id/units/:geoUnitId", async (request) => {
     const { id, geoUnitId } = unitParams.parse(request.params);
     return game.unit(id, geoUnitId, await guard.optional(request));

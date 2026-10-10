@@ -210,6 +210,37 @@ describe.skipIf(!url)("battles", () => {
       );
     });
 
+    it("lists the territories a player can attack now: the map marks them", async () => {
+      const targets = async (user: string | null) =>
+        (await as(user, "GET", `/api/matches/${matchId}/targets`)).json<{
+          territoryIds: string[];
+        }>().territoryIds;
+      const target = (await territoryOf(3)).id;
+      // What Anna can attack is what the card of each territory says she can.
+      const listed = await targets("anna");
+      expect(listed).toContain(target);
+      for (const id of listed) {
+        const territory = await prisma.territory.findUniqueOrThrow({
+          where: { id },
+          include: { units: true },
+        });
+        const card = (
+          await as("anna", "GET", `/api/matches/${matchId}/units/${territory.units[0]?.geoUnitId}`)
+        ).json<{ attack: { blocked: string | null; from: { usable: boolean }[] } | null }>();
+        expect(card.attack?.blocked, territory.name).toBeNull();
+        expect(card.attack?.from.some((source) => source.usable)).toBe(true);
+      }
+      // Nothing for who does not play, and nothing left once it is in a battle.
+      expect(await targets(null)).toEqual([]);
+      expect((await attack("anna", 3, [2])).statusCode).toBe(201);
+      expect(await targets("anna")).not.toContain(target);
+      // Protected until the end of the turn: not a target.
+      await prisma.battle.deleteMany({});
+      expect(await targets("anna")).toContain(target);
+      await prisma.territory.update({ where: { id: target }, data: { protectedUntilTurn: 2 } });
+      expect(await targets("anna")).not.toContain(target);
+    });
+
     it("joins the strength of several territories at a progressive cost", async () => {
       // Make Comune 1 a neighbour of the target as well.
       await prisma.geoAdjacency.create({ data: { aId: unit[1] ?? 0, bId: unit[3] ?? 0 } });
