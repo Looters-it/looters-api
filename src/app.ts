@@ -22,6 +22,7 @@ import { StructureService } from "./modules/game/structures.js";
 import { registerMatchRoutes } from "./modules/matches/routes.js";
 import { MatchService } from "./modules/matches/service.js";
 import { registerStatsRoutes } from "./modules/stats/routes.js";
+import { registerLeaderboardRoutes } from "./modules/leaderboard/routes.js";
 import { BotRunner } from "./modules/bots/runner.js";
 import { BotService } from "./modules/bots/service.js";
 import { RealtimeHub } from "./realtime/hub.js";
@@ -198,6 +199,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   board.onChange = matches.onChange;
   registerBoardRoutes(app, board, guard);
   registerStatsRoutes(app, hub);
+  registerLeaderboardRoutes(app, { prisma: deps.prisma, guard });
   await registerWebSocket(app, hub, guard, async (matchId, userId) => {
     const empires = await deps.prisma.empire.count({
       where: { matchId, userId, status: "ACTIVE" },

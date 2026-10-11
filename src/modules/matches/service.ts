@@ -825,6 +825,8 @@ export class MatchService {
           allocationMode: true,
           lastCapitalMoveTurn: true,
           fallenTurn: true,
+          place: true,
+          award: true,
           user: { select: { username: true, isBot: true } },
           logo: { select: { updatedAt: true } },
         },

@@ -109,6 +109,11 @@ model User {
   role         Role      @default(USER)
   // An empire played by the server: nobody can log in as this user.
   isBot        Boolean   @default(false)
+  // The global ranking: the awards of the finished matches, how many they were and
+  // the turns played in them. Written by the jobs when a match ends.
+  elo          Int       @default(0)
+  ratedMatches Int       @default(0)
+  ratedTurns   Int       @default(0)
   createdAt    DateTime  @default(now())
   sessions     Session[]
   empires      Empire[]
@@ -116,6 +121,7 @@ model User {
   invitations  MatchInvitation[]
 
   @@index([email])
+  @@index([elo(sort: Desc)])
 }
 
 model Session {
@@ -286,6 +292,9 @@ model Empire {
   lastCapitalMoveTurn Int?
   joinedAt            DateTime        @default(now())
   fallenTurn          Int?
+  // Set when the match ends: where the empire finished (1 is first) and what it earned.
+  place               Int?
+  award               Int?
   territories         Territory[]
   structures          Structure[]
   logo                EmpireLogo?
