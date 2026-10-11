@@ -57,7 +57,7 @@ const matchRulesBase = z.strictObject({
   mergeCostTurns: z.number().min(0).default(0.5),
   mergeMaxUnits: z.number().int().min(2).default(5),
   secondCapitalCostTurns: z.number().min(0).default(20),
-  blockCost: count.default(300),
+  blockCost: count.default(150),
   blockTurns: count.default(5),
   blockCooldownTurns: count.default(5),
 

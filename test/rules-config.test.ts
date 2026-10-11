@@ -24,7 +24,7 @@ describe("match rules configuration", () => {
       mergeCostTurns: 0.5,
       mergeMaxUnits: 5,
       secondCapitalCostTurns: 20,
-      blockCost: 300,
+      blockCost: 150,
       blockTurns: 5,
       blockCooldownTurns: 5,
       allianceMaxAllies: 2,

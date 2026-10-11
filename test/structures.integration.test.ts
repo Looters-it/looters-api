@@ -33,7 +33,7 @@ describe("structure catalogue", () => {
     const block = structureDefinition("BLOCK");
     const second = structureDefinition("SECOND_CAPITAL");
     // A fixed cost, and a cost in turns: 20 turns of an income of 70.
-    expect(block?.cost(DEFAULT_MATCH_RULES, 70)).toBe(300);
+    expect(block?.cost(DEFAULT_MATCH_RULES, 70)).toBe(150);
     expect(second?.cost(DEFAULT_MATCH_RULES, 70)).toBe(1400);
     expect(block?.durationTurns(DEFAULT_MATCH_RULES)).toBe(5);
     expect(second?.durationTurns(DEFAULT_MATCH_RULES)).toBeNull();
@@ -219,10 +219,10 @@ describe.skipIf(!url)("structures and merged areas", () => {
     (response.json() as { error?: { code: string } }).error?.code;
 
   describe("military block", () => {
-    it("costs 300 from the territory, lasts five turns and is public", async () => {
+    it("costs 150 from the territory, lasts five turns and is public", async () => {
       const response = await build("anna", "BLOCK", 3);
       expect(response.statusCode, response.body).toBe(201);
-      expect((await territoryOf(3)).resources).toBe(1700);
+      expect((await territoryOf(3)).resources).toBe(1850);
 
       const structure = await prisma.structure.findFirstOrThrow();
       // Built in turn 10 for 5 turns: active through turn 14, then 5 turns of pause.
@@ -270,7 +270,7 @@ describe.skipIf(!url)("structures and merged areas", () => {
     });
 
     it("needs the resources, an own territory and no battle on it", async () => {
-      await prisma.territory.update({ where: { id: await idOf(3) }, data: { resources: 299 } });
+      await prisma.territory.update({ where: { id: await idOf(3) }, data: { resources: 149 } });
       expect(errorCode(await build("anna", "BLOCK", 3))).toBe("STRUCTURE_NOT_ENOUGH_RESOURCES");
       expect(errorCode(await build("anna", "BLOCK", 4))).toBe("NOT_YOUR_TERRITORY");
       expect(errorCode(await build("anna", "NO_SUCH", 2))).toBe("UNKNOWN_STRUCTURE");
