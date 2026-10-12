@@ -148,6 +148,24 @@ const GERMAN_CITY_STATES: Record<string, string> = {
   Hamburg: "Schleswig-Holstein und Hamburg",
   "Schleswig-Holstein": "Schleswig-Holstein und Hamburg",
 };
+const POLISH_VOIVODESHIPS: Record<string, string> = {
+  "Greater Poland Voivodeship": "Wielkopolskie",
+  "Kuyavian-Pomeranian Voivodeship": "Kujawsko-pomorskie",
+  "Lesser Poland Voivodeship": "Małopolskie",
+  "Lower Silesian Voivodeship": "Dolnośląskie",
+  "Lublin Voivodeship": "Lubelskie",
+  "Lubusz Voivodeship": "Lubuskie",
+  "Masovian Voivodeship": "Mazowieckie",
+  "Opole Voivodeship": "Opolskie",
+  "Podlaskie Voivodeship": "Podlaskie",
+  "Pomeranian Voivodeship": "Pomorskie",
+  "Silesian Voivodeship": "Śląskie",
+  "Subcarpathian Voivodeship": "Podkarpackie",
+  "Warmian-Masurian Voivodeship": "Warmińsko-mazurskie",
+  "West Pomeranian Voivodeship": "Zachodniopomorskie",
+  "Łódź Voivodeship": "Łódzkie",
+  "Świętokrzyskie Voivodeship": "Świętokrzyskie",
+};
 const STAT_FI =
   "https://geo.stat.fi/geoserver/tilastointialueet/wfs?service=WFS&version=2.0.0&request=GetFeature&outputFormat=application/json&srsName=EPSG:4326&typeName=tilastointialueet";
 const GEOBOUNDARIES = "https://github.com/wmgeolab/geoBoundaries/raw/9469f09/releaseData/gbOpen";
@@ -181,6 +199,8 @@ interface Source {
     overpass?: string;
     name: (properties: Record<string, unknown>) => string;
   };
+  /** Decimals kept in the coordinates: five (a metre) unless the source is far heavier than needed. */
+  decimals?: number;
   /** Territories that are not municipalities, from somewhere else. */
   more?: () => Promise<Unit[]>;
   unit: (feature: Feature) => Unit | null;
@@ -359,6 +379,47 @@ const COUNTRIES: Record<string, Source> = {
     },
     unit: boundaryUnit(""),
   },
+  austria: {
+    url: `${GEOBOUNDARIES}/AUT/ADM3/geoBoundaries-AUT-ADM3.geojson`,
+    decimals: 4,
+    regions: {
+      url: `${GEOBOUNDARIES}/AUT/ADM1/geoBoundaries-AUT-ADM1.geojson`,
+      // Vienna is one municipality: it goes with the state around it.
+      name: (p) =>
+        ["Wien", "Niederösterreich"].includes(text(p.shapeName))
+          ? "Wien und Niederösterreich"
+          : text(p.shapeName),
+    },
+    unit: boundaryUnit(""),
+  },
+  ireland: {
+    url: `${GEOBOUNDARIES}/IRL/ADM2/geoBoundaries-IRL-ADM2.geojson`,
+    regions: {
+      url: `${GEOBOUNDARIES}/IRL/ADM1/geoBoundaries-IRL-ADM1.geojson`,
+      name: (p) => text(p.shapeName),
+    },
+    // The local electoral areas come shouted and numbered: "RATOATH LEA-7" is Ratoath.
+    unit: (feature) => {
+      const unit = boundaryUnit("")(feature);
+      const plain = unit.name.replace(/\s*LEA\s*-\s*\d+\s*$/i, "").replace(/\s*-\s*/g, "-");
+      unit.name = plain.toLowerCase().replace(/(^|[\s-])\p{L}/gu, (letter) => letter.toUpperCase());
+      return unit;
+    },
+  },
+  poland: {
+    url: `${GEOBOUNDARIES}/POL/ADM3/geoBoundaries-POL-ADM3.geojson`,
+    decimals: 4,
+    regions: {
+      url: `${GEOBOUNDARIES}/POL/ADM1/geoBoundaries-POL-ADM1.geojson`,
+      // The source names the voivodeships in English.
+      name: (p) => POLISH_VOIVODESHIPS[text(p.shapeName)] ?? text(p.shapeName),
+    },
+    unit: (feature) => {
+      const unit = boundaryUnit("")(feature);
+      unit.name = unit.name.replace(/^gmina\s+/i, "");
+      return unit;
+    },
+  },
   andorra: {
     url: `${GEOBOUNDARIES}/AND/ADM1/geoBoundaries-AND-ADM1.geojson`,
     unit: boundaryUnit("Andorra"),
@@ -525,11 +586,28 @@ const polygons = (geometry: Feature["geometry"]): unknown[] =>
       ? [geometry.coordinates]
       : [];
 
-/** Five decimals are a metre: more only makes the file heavier. */
-const rounded = (coordinates: unknown): unknown =>
-  Array.isArray(coordinates)
-    ? coordinates.map(rounded)
-    : Math.round((coordinates as number) * 1e5) / 1e5;
+/**
+ * The polygons of a geometry with their coordinates rounded: the points that fall on
+ * the one before are dropped, and so are the rings left with no surface. A border two
+ * municipalities share stays shared, each point being rounded the same way in both.
+ */
+function rounded(geometry: Feature["geometry"], decimals: number): Position[][][] {
+  const unit = 10 ** decimals;
+  return (polygons(geometry) as Position[][][])
+    .map((polygon) =>
+      polygon
+        .map((ring) =>
+          ring
+            .map(([x, y]): Position => [Math.round(x * unit) / unit, Math.round(y * unit) / unit])
+            .filter((point, index, all) => {
+              const before = all[index - 1];
+              return !before || before[0] !== point[0] || before[1] !== point[1];
+            }),
+        )
+        .filter((ring) => ring.length >= 4),
+    )
+    .filter((polygon) => polygon.length > 0 && (polygon[0]?.length ?? 0) >= 4);
+}
 
 const wanted = process.argv.slice(2).filter((argument) => !argument.startsWith("-"));
 const out = join(process.cwd(), "geodata");
@@ -564,23 +642,42 @@ for (const [country, source] of Object.entries(COUNTRIES)) {
     const shapes = source.regions.overpass
       ? await fromOverpass(source.regions.overpass)
       : await fromUrl(source.regions.url ?? "");
+    // Each outer ring with its box: most rings are ruled out without being walked.
     const named = shapes.map((shape) => ({
       name: source.regions?.name(shape.properties) ?? "",
-      outers: polygons(shape.geometry).map((polygon) => (polygon as Position[][])[0] ?? []),
+      outers: polygons(shape.geometry).map((polygon) => {
+        const ring = (polygon as Position[][])[0] ?? [];
+        const box = [Infinity, Infinity, -Infinity, -Infinity];
+        for (const [x, y] of ring) {
+          box[0] = Math.min(box[0] ?? x, x);
+          box[1] = Math.min(box[1] ?? y, y);
+          box[2] = Math.max(box[2] ?? x, x);
+          box[3] = Math.max(box[3] ?? y, y);
+        }
+        return { ring, box };
+      }),
     }));
+    const holds = (region: (typeof named)[number], [x, y]: Position) =>
+      region.outers.some(
+        ({ ring, box }) =>
+          x >= (box[0] ?? 0) &&
+          y >= (box[1] ?? 0) &&
+          x <= (box[2] ?? 0) &&
+          y <= (box[3] ?? 0) &&
+          inside([x, y], ring),
+      );
     for (const unit of units) {
       // Some points of its border, spread along it: the region that holds most of them.
       const border = polygons(unit.geometry)
         .map((polygon) => (polygon as Position[][])[0] ?? [])
         .sort((a, b) => b.length - a.length)[0];
-      const step = Math.max(1, Math.floor((border?.length ?? 0) / 40));
+      const step = Math.max(1, Math.floor((border?.length ?? 0) / 15));
       const sample = (border ?? []).filter((_, index) => index % step === 0);
-      const votes = named.map(
-        (region) =>
-          sample.filter((point) => region.outers.some((outer) => inside(point, outer))).length,
-      );
+      const votes = named.map((region) => sample.filter((point) => holds(region, point)).length);
       const best = votes.indexOf(Math.max(...votes));
       unit.region = (votes[best] ?? 0) > 0 ? (named[best]?.name ?? "") : "";
+      // Two of the same name are told apart by their region.
+      if (unit.region) unit.within = unit.region;
     }
     const lost = units.filter((unit) => !unit.region);
     if (lost.length > 0) {
@@ -631,7 +728,7 @@ for (const [country, source] of Object.entries(COUNTRIES)) {
     return {
       type: "Feature",
       properties: { name, code: unit.code },
-      geometry: { type: unit.geometry?.type, coordinates: rounded(unit.geometry?.coordinates) },
+      geometry: { type: "MultiPolygon", coordinates: rounded(unit.geometry, source.decimals ?? 5) },
     };
   });
 
