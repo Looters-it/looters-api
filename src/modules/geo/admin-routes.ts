@@ -6,6 +6,7 @@ import type { AuthGuard } from "../../auth/guard.js";
 import { AppError, notFound } from "../../http/errors.js";
 import { enqueueJob } from "../../queue/jobs.js";
 import { contentMatchesFormat, formatFromFilename, UploadStore } from "./files.js";
+import { classifyInBackground } from "./isolation.js";
 
 export interface GeoAdminDeps {
   prisma: PrismaClient;
@@ -58,6 +59,9 @@ export async function registerGeoAdminRoutes(
 ): Promise<void> {
   const { prisma, guard } = deps;
   const store = new UploadStore(deps.uploadDir);
+  // The uploads already seen done, and how lately one must have finished to be news.
+  const classified = new Set<string>();
+  const JUST_DONE_MS = 5 * 60_000;
 
   await app.register(multipart, {
     limits: { fileSize: deps.maxUploadBytes, files: 1, fields: 0 },
@@ -258,6 +262,15 @@ export async function registerGeoAdminRoutes(
     const { id } = idParams.parse(request.params);
     const upload = await prisma.geoUpload.findUnique({ where: { id }, select: uploadSelect });
     if (!upload) throw notFound("Upload");
+    // Just done: its municipalities, and the neighbours across a border, are looked at again.
+    if (upload.status === "DONE" && !classified.has(upload.id)) {
+      classified.add(upload.id);
+      if (upload.finishedAt && Date.now() - upload.finishedAt.getTime() < JUST_DONE_MS) {
+        classifyInBackground(prisma, (error) => {
+          request.log.error({ event: "geo_isolation_failed", err: error }, "not classified");
+        });
+      }
+    }
     return (await withIsolated([upload]))[0];
   });
 

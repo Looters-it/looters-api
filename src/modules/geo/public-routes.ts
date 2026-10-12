@@ -72,13 +72,16 @@ export function registerGeoPublicRoutes(app: FastifyInstance, deps: GeoPublicDep
     return value;
   };
   const readDataVersion = async (areaId: string): Promise<string | null> => {
-    const rows = await prisma.$queryRaw<{ exists: boolean; count: number; last: number | null }[]>`
+    const rows = await prisma.$queryRaw<
+      { exists: boolean; count: number; last: number | null; marked: number }[]
+    >`
       SELECT EXISTS (SELECT 1 FROM "GeoArea" WHERE id = ${areaId}) AS "exists",
-        count(u.id)::int AS count, max(u.id) AS last
+        count(u.id)::int AS count, max(u.id) AS last, count(u.isolation)::int AS marked
       FROM "GeoUnit" u WHERE u."areaId" IN (${subtree(areaId)})`;
     const row = rows[0];
     if (!row?.exists) return null;
-    return `${row.count}-${row.last ?? 0}`;
+    // Islands and exclaves are in the tiles: found again, the tiles change.
+    return `${row.count}-${row.last ?? 0}-${row.marked}`;
   };
 
   /** Geographic areas that have municipalities, largest first. */

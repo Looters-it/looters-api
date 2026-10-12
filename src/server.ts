@@ -2,6 +2,7 @@ import { buildApp } from "./app.js";
 import { loadServerEnv } from "./config/env.js";
 import { createPrisma } from "./db/prisma.js";
 import { REDACTED_PATHS } from "./http/logging.js";
+import { classifyInBackground } from "./modules/geo/isolation.js";
 import { createBattleQueue } from "./queue/battles.js";
 import { enqueueJob } from "./queue/jobs.js";
 import { listenForNotifications } from "./queue/notifications.js";
@@ -87,6 +88,11 @@ for (const event of ["uncaughtException", "unhandledRejection"] as const) {
 await app.listen({ port: env.PORT, host: env.HOST });
 
 await app.wakeBots();
+
+// Islands and exclaves are found again at every start: the countries may have changed.
+classifyInBackground(prisma, (error) => {
+  app.log.error({ event: "geo_isolation_failed", err: error }, "islands and exclaves not found");
+});
 
 // Round trip through the queue: proves at startup that `jobs` consumes it.
 await enqueueJob(prisma, "system.ping", { sentAt: new Date().toISOString() });

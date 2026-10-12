@@ -182,6 +182,11 @@ model GeoUpload {
   @@index([areaId])
 }
 
+enum GeoIsolation {
+  ISLAND
+  EXCLAVE
+}
+
 // A real municipality. Never owned: ownership lives on Territory.
 model GeoUnit {
   id          Int                                        @id @default(autoincrement())
@@ -196,6 +201,8 @@ model GeoUnit {
   areaKm2     Float
   geom        Unsupported("geometry(MultiPolygon,4326)")
   geomSimple  Unsupported("geometry(MultiPolygon,4326)")
+  // Why it has no border with the rest of its country, when it has none.
+  isolation   GeoIsolation?
   territories TerritoryUnit[]
   adjacentA   GeoAdjacency[]                             @relation("adjA")
   adjacentB   GeoAdjacency[]                             @relation("adjB")

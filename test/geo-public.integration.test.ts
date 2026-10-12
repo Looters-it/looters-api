@@ -3,6 +3,7 @@ import type { FastifyInstance } from "fastify";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
 import { createPrisma } from "../src/db/prisma.js";
+import { classifyIsolated } from "../src/modules/geo/isolation.js";
 import { TileCache } from "../src/modules/geo/tile-cache.js";
 
 describe("tile cache", () => {
@@ -211,6 +212,44 @@ describe.skipIf(!url)("public geography", () => {
     expect(wider?.unitCount).toBe(2);
     expect(wider?.bounds[2]).toBeCloseTo(9.7);
     expect(JSON.stringify(wider?.outline)).not.toBe(JSON.stringify(islandArea.outline));
+  });
+
+  it("tells islands from exclaves among the municipalities without a border", async () => {
+    const { north, upload, milano, monza } = await seed();
+    const lodi = await unit(north, upload, "Lodi", 9.5, 45.3);
+    // Campione has two of its four sides on another country; Capri is out at sea.
+    const campione = await unit(north, upload, "Campione", 8.9, 45.9);
+    const capri = await unit(north, upload, "Capri", 14.2, 40.5);
+    const swiss = await prisma.geoArea.create({ data: { name: "Svizzera" } });
+    await unit(swiss.id, upload, "Lugano", 8.9, 46.0);
+    await unit(swiss.id, upload, "Bissone", 9.0, 45.9);
+    await prisma.geoAdjacency.create({ data: { aId: milano, bId: monza } });
+    // A border drawn by hand, a bridge, does not make an island less of one.
+    await prisma.geoAdjacency.create({ data: { aId: lodi, bId: capri, manual: true } });
+
+    await classifyIsolated(prisma);
+    const kinds = await prisma.geoUnit.findMany({
+      where: { id: { in: [milano, monza, lodi, campione, capri] } },
+      select: { id: true, isolation: true },
+    });
+    const kindOf = (id: number) => kinds.find((entry) => entry.id === id)?.isolation;
+    expect(kindOf(milano)).toBeNull();
+    expect(kindOf(monza)).toBeNull();
+    expect(kindOf(lodi)).toBe("ISLAND");
+    expect(kindOf(capri)).toBe("ISLAND");
+    expect(kindOf(campione)).toBe("EXCLAVE");
+
+    // The tiles say it, on the municipality and as a mark of its own.
+    const { tiles } = (await app.inject(`/api/geo/areas/${north}/map`)).json<{ tiles: string }>();
+    const tile = await app.inject(tiles.replace("{z}/{x}/{y}", "8/134/91"));
+    const body = tile.rawPayload.toString("latin1");
+    for (const text of ["marks", "kind", "exclave"]) expect(body).toContain(text);
+
+    // Joined to its country, it is neither any more.
+    await prisma.geoAdjacency.create({ data: { aId: milano, bId: campione } });
+    await classifyIsolated(prisma);
+    const after = await prisma.geoUnit.findUnique({ where: { id: campione } });
+    expect(after?.isolation).toBeNull();
   });
 
   it("rejects tiles outside the grid or the zoom range", async () => {

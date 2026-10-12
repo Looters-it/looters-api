@@ -24,7 +24,8 @@
     "load:duels": "tsx --env-file-if-exists=.env scripts/duel-load.ts",
     "regions": "tsx --env-file-if-exists=.env scripts/split-italy-regions.ts",
     "areas:fetch": "tsx scripts/fetch-countries.ts",
-    "areas:split": "tsx --env-file-if-exists=.env scripts/split-regions.ts"
+    "areas:split": "tsx --env-file-if-exists=.env scripts/split-regions.ts",
+    "areas:classify": "tsx --env-file-if-exists=.env scripts/classify-isolated.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.2",

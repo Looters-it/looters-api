@@ -23,9 +23,10 @@ export const insideGrid = (tile: { z: number; x: number; y: number }) =>
   tile.x < 2 ** tile.z && tile.y < 2 ** tile.z;
 
 /**
- * Builds a Mapbox Vector Tile with two layers: `units` (polygons; the feature
- * id is the GeoUnit id, `name` its name) and, from LABEL_MIN_ZOOM, `labels`
- * (one point inside each municipality). `where` selects the municipalities,
+ * Builds a Mapbox Vector Tile with three layers: `units` (polygons; the feature
+ * id is the GeoUnit id, `name` its name), from LABEL_MIN_ZOOM `labels` (one point
+ * inside each municipality) and, at every zoom, `marks`: a point on each island
+ * and exclave, with its `kind` (`island` or `exclave`), which the units carry too. `where` selects the municipalities,
  * as a condition on the GeoUnit alias `u`.
  */
 export async function generateTile(
@@ -49,11 +50,12 @@ export async function generateTile(
         ST_Transform(ST_TileEnvelope(${zoom}::int, ${x}::int, ${y}::int, margin => 0.02), 4326) AS reach
     ), found AS (
       SELECT u.id, u.name, u."centroidLon" AS lon, u."centroidLat" AS lat, u."areaKm2",
+        lower(u.isolation::text) AS kind,
         ${geometry} AS geom
       FROM "GeoUnit" u, tile
       WHERE (${where}) AND u.geom && tile.reach
     ), units AS (
-      SELECT found.id, found.name,
+      SELECT found.id, found.name, found.kind,
         ST_AsMVTGeom(${projected}, tile.envelope, 4096, 64, true) AS shape
       FROM found, tile
     ), labels AS (
@@ -61,9 +63,15 @@ export async function generateTile(
         ST_AsMVTGeom(ST_Transform(ST_SetSRID(ST_MakePoint(found.lon, found.lat), 4326), 3857),
           tile.envelope, 4096, 0, true) AS point
       FROM found, tile WHERE ${zoom >= LABEL_MIN_ZOOM}::boolean
+    ), marks AS (
+      SELECT found.id, found.name, found.kind,
+        ST_AsMVTGeom(ST_Transform(ST_SetSRID(ST_MakePoint(found.lon, found.lat), 4326), 3857),
+          tile.envelope, 4096, 0, true) AS point
+      FROM found, tile WHERE found.kind IS NOT NULL
     )
     SELECT (SELECT coalesce(ST_AsMVT(units, 'units', 4096, 'shape', 'id'), ''::bytea) FROM units WHERE shape IS NOT NULL)
         || (SELECT coalesce(ST_AsMVT(labels, 'labels', 4096, 'point', 'id'), ''::bytea) FROM labels WHERE point IS NOT NULL)
+        || (SELECT coalesce(ST_AsMVT(marks, 'marks', 4096, 'point', 'id'), ''::bytea) FROM marks WHERE point IS NOT NULL)
       AS tile`;
   return Buffer.from(rows[0]?.tile ?? []);
 }

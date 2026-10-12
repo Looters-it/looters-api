@@ -284,7 +284,7 @@ export class GameService {
     const unit = await this.prisma.territoryUnit.findUnique({
       where: { matchId_geoUnitId: { matchId, geoUnitId } },
       select: {
-        geoUnit: { select: { name: true } },
+        geoUnit: { select: { name: true, isolation: true } },
         territory: {
           select: {
             id: true,
@@ -422,6 +422,8 @@ export class GameService {
     return {
       geoUnitId,
       name: unit.geoUnit.name,
+      /** An island, an exclave, or neither: why it may have no neighbours. */
+      isolation: unit.geoUnit.isolation,
       territory: {
         id: territory.id,
         name: territory.name,
