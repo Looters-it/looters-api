@@ -70,6 +70,9 @@ const matchRulesBase = z.strictObject({
   portCost: count.default(100),
   portFoundIslandPct: pct.default(50),
   portFoundCoastPct: pct.default(20),
+  // How far a port reaches, in kilometres between the centres of two municipalities.
+  // Zero: as far as the sea goes.
+  portRangeKm: count.default(200),
 
   // Alliances (§2.6, §9 #9)
   // Alliances are pacts between two empires: this is how many an empire may hold at once.

@@ -2,6 +2,7 @@ import { Prisma, type Empire, type Match, type PrismaClient } from "@prisma/clie
 import type { AuthContext } from "../../auth/sessions.js";
 import { AppError, notFound } from "../../http/errors.js";
 import { rulesOf } from "../matches/service.js";
+import { DEFAULT_MATCH_RULES } from "../../rules/config.js";
 import { phaseOf, type TurnPhase } from "../../rules/phases.js";
 
 export type Tx = Prisma.TransactionClient;
@@ -41,8 +42,9 @@ export function neighboursOf(db: Tx | PrismaClient, matchId: string, territoryId
 /**
  * Every way from a municipality to another, as rows of `x` (from) and `y` (to): the
  * borders, both ways, and the sea, from the municipalities of a territory with a port
- * to every municipality of the match that is on the sea. Where a query asks what an
- * empire can reach, this is what it joins.
+ * to every municipality of the match that is on the sea and within the range of the
+ * port (`portRangeKm` of the match, between the centres of the two municipalities;
+ * zero is no limit). Where a query asks what an empire can reach, this is what it joins.
  */
 export const reachEdges = (matchId: string) => Prisma.sql`
   SELECT "aId" AS x, "bId" AS y FROM "GeoAdjacency"
@@ -54,8 +56,16 @@ export const reachEdges = (matchId: string) => Prisma.sql`
   JOIN "TerritoryUnit" shore ON shore."matchId" = port."matchId"
     AND shore."territoryId" <> port."territoryId"
   JOIN "GeoUnit" sea ON sea.id = shore."geoUnitId" AND sea.coastal
+  JOIN "GeoUnit" quay ON quay.id = harbour."geoUnitId"
+  JOIN "Match" played ON played.id = port."matchId"
+  CROSS JOIN LATERAL (
+    SELECT coalesce((played.config->>'portRangeKm')::float8, ${DEFAULT_MATCH_RULES.portRangeKm}) AS km
+  ) reach
   WHERE port."matchId" = ${matchId} AND port.active
-    AND jsonb_exists(port.data->'effects', 'SEA_REACH')`;
+    AND jsonb_exists(port.data->'effects', 'SEA_REACH')
+    AND (reach.km = 0 OR ST_DistanceSphere(
+      ST_MakePoint(quay."centroidLon", quay."centroidLat"),
+      ST_MakePoint(sea."centroidLon", sea."centroidLat")) <= reach.km * 1000)`;
 
 /** A territory that another can be reached from, or that it reaches. */
 export interface Reached {

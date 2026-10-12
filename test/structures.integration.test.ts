@@ -280,6 +280,38 @@ describe.skipIf(!url)("structures and merged areas", () => {
       expect(attack.statusCode).toBe(201);
     });
 
+    it("reaches only as far as its range", async () => {
+      await onSea(0, 5);
+      // The centres of 0 and 5 are some 39 km apart.
+      const match = await prisma.match.findUniqueOrThrow({ where: { id: matchId } });
+      const range = (portRangeKm: number) =>
+        prisma.match.update({
+          where: { id: matchId },
+          data: { config: { ...(match.config as object), portRangeKm } },
+        });
+      expect((await build("anna", "PORT", 0)).statusCode).toBe(201);
+      await setPhase(prisma, matchId, "ACTION");
+      const reached = async () =>
+        (await as("anna", "GET", `/api/matches/${matchId}/targets`)).json<{
+          territoryIds: string[];
+        }>().territoryIds;
+
+      await range(35);
+      expect(await reached()).not.toContain(await idOf(5));
+      const far = await as("anna", "POST", `/api/matches/${matchId}/attacks`, {
+        targetGeoUnitId: unit[5],
+        fromTerritoryIds: [await idOf(0)],
+        turn: 10,
+      });
+      expect(far.json<{ error: { code: string } }>().error.code).toBe("NOT_ADJACENT");
+
+      await range(45);
+      expect(await reached()).toContain(await idOf(5));
+      // Zero is no limit at all.
+      await range(0);
+      expect(await reached()).toContain(await idOf(5));
+    });
+
     it("annexes across the sea, and may find a port already there", async () => {
       await onSea(0, 5);
       const match = await prisma.match.findUniqueOrThrow({ where: { id: matchId } });
