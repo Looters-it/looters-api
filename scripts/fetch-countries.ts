@@ -23,9 +23,16 @@
  *   municipalities have not changed since 2007. The official service asks for an account.
  * - Norway: Kartverket's municipalities of 2024, CC BY 4.0, as prepared (cut along the
  *   coast) at github.com/robhop/fylker-og-kommuner.
+ * - Faroe Islands, Iceland, Greenland: the municipalities as drawn in OpenStreetMap
+ *   (© OpenStreetMap contributors, ODbL), asked to Overpass. No official source gives all
+ *   three in a form that can be read here; the few municipalities they have are not split
+ *   into regions. The Greenlandic ones are drawn there with straight lines out at sea, so
+ *   they are cut along the coast of Natural Earth (public domain), and the land that no
+ *   municipality has, the national park of the north-east, is added as a territory.
  */
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import polygonClipping, { type MultiPolygon } from "polygon-clipping";
 
 interface Feature {
   type: "Feature";
@@ -104,7 +111,31 @@ const NORWEGIAN_COUNTIES: Record<string, string> = {
 /** Opendatasoft gives some values as a list of one. */
 const text = (value: unknown): string => String(Array.isArray(value) ? value[0] : (value ?? ""));
 
-const COUNTRIES: Record<string, { url: string; unit: (feature: Feature) => Unit | null }> = {
+/** A municipality of OpenStreetMap, under the name of its country: nothing to split it by. */
+const osmUnit =
+  (country: string) =>
+  ({ properties: p, geometry }: Feature): Unit => ({
+    name: text(p.name),
+    code: `osm-${text(p.id)}`,
+    region: country,
+    within: text(p.id),
+    geometry,
+  });
+
+interface Source {
+  /** A GeoJSON to download, */
+  url?: string;
+  /** or what to ask Overpass: relations, given back with their geometry. */
+  overpass?: string;
+  /**
+   * The land of the country, for municipalities drawn out at sea: they are cut along it,
+   * and its largest part that none of them has becomes a territory called `rest`.
+   */
+  land?: { url: string; is: (properties: Record<string, unknown>) => boolean; rest: string };
+  unit: (feature: Feature) => Unit | null;
+}
+
+const COUNTRIES: Record<string, Source> = {
   switzerland: {
     url: `${ODS}/georef-switzerland-gemeinde/exports/geojson`,
     unit: ({ properties: p, geometry }) =>
@@ -161,7 +192,112 @@ const COUNTRIES: Record<string, { url: string; unit: (feature: Feature) => Unit 
         : null;
     },
   },
+  "faroe-islands": {
+    overpass: `area["ISO3166-1"="FO"][admin_level=2]->.a;relation(area.a)[boundary=administrative][admin_level=7];`,
+    unit: osmUnit("Føroyar"),
+  },
+  iceland: {
+    overpass: `area["ISO3166-1"="IS"][admin_level=2]->.a;relation(area.a)[boundary=administrative][admin_level=6];`,
+    unit: osmUnit("Ísland"),
+  },
+  greenland: {
+    overpass: `relation["ISO3166-2"~"^GL-"][boundary=administrative];`,
+    land: {
+      url: "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_10m_admin_0_countries.geojson",
+      is: (properties) => properties.ADM0_A3 === "GRL",
+      rest: "Kalaallit Nunaanni nuna eqqissisimatitaq",
+    },
+    unit: osmUnit("Kalaallit Nunaat"),
+  },
 };
+
+/** The servers that answer Overpass queries: the next is tried when one is busy. */
+const OVERPASS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.private.coffee/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+];
+
+type Position = [number, number];
+interface OsmRelation {
+  id: number;
+  tags: Record<string, string>;
+  members: { type: string; role: string; geometry?: { lon: number; lat: number }[] }[];
+}
+
+/** Joins the ways of a border end to end into closed rings; what does not close is left out. */
+function rings(ways: Position[][]): Position[][] {
+  const left = ways.filter((way) => way.length > 1).map((way) => [...way]);
+  const closed: Position[][] = [];
+  const same = (a?: Position, b?: Position) => !!a && !!b && a[0] === b[0] && a[1] === b[1];
+  for (let ring = left.pop(); ring; ring = left.pop()) {
+    while (!same(ring[0], ring.at(-1))) {
+      const end = ring.at(-1);
+      const next = left.findIndex((way) => same(way[0], end) || same(way.at(-1), end));
+      const way = next === -1 ? undefined : left.splice(next, 1)[0];
+      if (!way) break;
+      ring.push(...(same(way[0], end) ? way : way.reverse()).slice(1));
+    }
+    if (ring.length > 3 && same(ring[0], ring.at(-1))) closed.push(ring);
+  }
+  return closed;
+}
+
+/** Whether a point is inside a ring: counts the sides a line drawn from it crosses. */
+function inside(point: Position | undefined, ring: Position[]): boolean {
+  if (!point) return false;
+  const [x, y] = point;
+  let within = false;
+  ring.forEach(([xi, yi], index) => {
+    const [xj, yj] = ring.at(index - 1) ?? [xi, yi];
+    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) within = !within;
+  });
+  return within;
+}
+
+/** A relation of OpenStreetMap as a feature: its outer rings, each with the holes inside it. */
+function osmFeature(relation: OsmRelation): Feature {
+  const ways = (role: string) =>
+    relation.members
+      .filter((member) => member.type === "way" && (member.role || "outer") === role)
+      .map((member) => (member.geometry ?? []).map((point): Position => [point.lon, point.lat]));
+  const holes = rings(ways("inner"));
+  const coordinates = rings(ways("outer")).map((outer) => [
+    outer,
+    ...holes.filter((hole) => inside(hole[0], outer)),
+  ]);
+  return {
+    type: "Feature",
+    properties: { ...relation.tags, id: relation.id },
+    geometry: coordinates.length > 0 ? { type: "MultiPolygon", coordinates } : null,
+  };
+}
+
+/** The public servers are often busy: each is tried in turn, a few times round. */
+async function fromOverpass(query: string): Promise<Feature[]> {
+  for (let round = 0; round < 4; round++) {
+    for (const server of OVERPASS) {
+      const response = await fetch(server, {
+        method: "POST",
+        headers: { "user-agent": "looters-geodata/1.0 (areas fetch script)" },
+        body: new URLSearchParams({ data: `[out:json][timeout:180];${query}out geom;` }),
+      }).catch(() => null);
+      const answer = response?.ok ? await response.text() : "";
+      if (answer.startsWith("{")) {
+        return (JSON.parse(answer) as { elements: OsmRelation[] }).elements.map(osmFeature);
+      }
+      console.log(`  ${server}: ${String(response?.status ?? "no answer")}, trying the next`);
+      await new Promise((resolve) => setTimeout(resolve, 10_000));
+    }
+  }
+  throw new Error("no Overpass server answered");
+}
+
+async function fromUrl(url: string): Promise<Feature[]> {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`${String(response.status)} from ${url}`);
+  return ((await response.json()) as { features: Feature[] }).features;
+}
 
 /** The polygons of a geometry, whichever of the two kinds it is. */
 const polygons = (geometry: Feature["geometry"]): unknown[] =>
@@ -183,14 +319,14 @@ await mkdir(out, { recursive: true });
 
 for (const [country, source] of Object.entries(COUNTRIES)) {
   if (wanted.length > 0 && !wanted.includes(country)) continue;
-  console.log(`${country}: fetching ${source.url}`);
-  const response = await fetch(source.url);
-  if (!response.ok) throw new Error(`${country}: ${String(response.status)} from the source`);
-  const collection = (await response.json()) as { features: Feature[] };
+  console.log(`${country}: fetching ${source.url ?? "from OpenStreetMap"}`);
+  const found = source.overpass
+    ? await fromOverpass(source.overpass)
+    : await fromUrl(source.url ?? "");
   // A source may give a municipality a piece at a time: the pieces are put back together.
   const byCode = new Map<string, Unit>();
   let skipped = 0;
-  for (const feature of collection.features) {
+  for (const feature of found) {
     const unit = feature.geometry ? source.unit(feature) : null;
     if (!unit || !unit.name || !unit.code) {
       skipped += 1;
@@ -206,6 +342,38 @@ for (const [country, source] of Object.entries(COUNTRIES)) {
     }
   }
   const units = [...byCode.values()];
+  if (source.land) {
+    const land = (await fromUrl(source.land.url)).filter((feature) =>
+      source.land?.is(feature.properties),
+    );
+    const coast = land.flatMap((feature) => polygons(feature.geometry)) as MultiPolygon;
+    for (const unit of units) {
+      unit.geometry = {
+        type: "MultiPolygon",
+        coordinates: polygonClipping.intersection(polygons(unit.geometry) as MultiPolygon, coast),
+      };
+    }
+    const free = polygonClipping.difference(
+      coast,
+      ...units.map((unit) => polygons(unit.geometry) as MultiPolygon),
+    );
+    const extent = (polygon: MultiPolygon[number]) => {
+      const xs = (polygon[0] ?? []).map((point) => point[0]);
+      const ys = (polygon[0] ?? []).map((point) => point[1]);
+      return (Math.max(...xs) - Math.min(...xs)) * (Math.max(...ys) - Math.min(...ys));
+    };
+    const largest = free.sort((a, b) => extent(b) - extent(a))[0];
+    const region = units[0]?.region ?? country;
+    if (largest) {
+      units.push({
+        name: source.land.rest,
+        code: `${country}-rest`,
+        region,
+        within: region,
+        geometry: { type: "MultiPolygon", coordinates: [largest] },
+      });
+    }
+  }
 
   // Names that come more than once say where they are: "Abbey (Lincoln)".
   const times = new Map<string, number>();
