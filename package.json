@@ -22,7 +22,9 @@
     "db:generate": "prisma generate",
     "load": "tsx --env-file-if-exists=.env scripts/load-test.ts",
     "load:duels": "tsx --env-file-if-exists=.env scripts/duel-load.ts",
-    "regions": "tsx --env-file-if-exists=.env scripts/split-italy-regions.ts"
+    "regions": "tsx --env-file-if-exists=.env scripts/split-italy-regions.ts",
+    "areas:fetch": "tsx scripts/fetch-countries.ts",
+    "areas:split": "tsx --env-file-if-exists=.env scripts/split-regions.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.2",
