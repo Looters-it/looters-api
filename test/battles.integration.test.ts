@@ -886,7 +886,15 @@ describe.skipIf(!url)("battles", () => {
       expect((await card("anna", 3)).attack).toEqual({
         left: 5,
         blocked: null,
-        from: [{ territoryId: (await ids([2]))[0], name: "Comune 2", resources: 10, usable: true }],
+        from: [
+          {
+            territoryId: (await ids([2]))[0],
+            name: "Comune 2",
+            resources: 10,
+            usable: true,
+            via: "land",
+          },
+        ],
       });
       expect((await card("anna", 5)).attack).toMatchObject({ blocked: "NOT_ADJACENT", from: [] });
       // Own territories and free ones are not attacked; guests cannot attack.

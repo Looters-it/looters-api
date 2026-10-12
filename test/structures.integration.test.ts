@@ -326,6 +326,20 @@ describe.skipIf(!url)("structures and merged areas", () => {
         territoryIds: string[];
       }>();
       expect(targets.territoryIds).toContain(await idOf(5));
+      // The card of the target says how each territory reaches it: the map asks the
+      // player where from, instead of attacking from everywhere at once.
+      const card = (await as("anna", "GET", `/api/matches/${matchId}/units/${unit[5]}`)).json<{
+        attack: { from: { territoryId: string; via: string }[] };
+      }>();
+      expect(card.attack.from).toEqual([
+        expect.objectContaining({ territoryId: await idOf(0), via: "sea" }),
+      ]);
+      const beside = (await as("anna", "GET", `/api/matches/${matchId}/units/${unit[4]}`)).json<{
+        attack: { from: { territoryId: string; via: string }[] };
+      }>();
+      expect(beside.attack.from).toContainEqual(
+        expect.objectContaining({ territoryId: await idOf(3), via: "land" }),
+      );
       // From the port, not from a territory that has none.
       const elsewhere = await as("anna", "POST", `/api/matches/${matchId}/attacks`, {
         targetGeoUnitId: unit[5],

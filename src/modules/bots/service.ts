@@ -445,7 +445,13 @@ export class BotService {
         const geoUnitId = state.territories.find((t) => t.id === territoryId)?.geoUnitIds[0];
         if (geoUnitId === undefined) continue;
         const attack = (await cardOf(geoUnitId))?.attack;
-        const sources = attack?.from.filter((s) => s.usable).map((s) => s.territoryId) ?? [];
+        // From one place only, the one that holds the most: every territory that joins
+        // an attack makes all of them pay a larger share.
+        const sources =
+          attack?.from
+            .filter((s) => s.usable)
+            .slice(0, 1)
+            .map((s) => s.territoryId) ?? [];
         if (!attack || attack.blocked !== null || sources.length === 0) continue;
         const declared = await this.attempt(() =>
           this.battles.declare(

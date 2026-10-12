@@ -420,6 +420,13 @@ export class GameService {
             source.battleLock === null &&
             source.resources >= 1 &&
             !has(source.id, "NO_ATTACK_FROM"),
+          // How it reaches the target: across a border, or from its port or its airport.
+          // An attack from far is never declared for the player: they choose where from.
+          via: neighbours.some((neighbour) => neighbour.territoryId === source.id)
+            ? ("land" as const)
+            : has(source.id, "SEA_REACH")
+              ? ("sea" as const)
+              : ("air" as const),
         })),
       };
     }
