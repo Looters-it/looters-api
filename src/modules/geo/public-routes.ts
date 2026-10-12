@@ -26,6 +26,10 @@ const tileParams = tileCoordinates
   .extend({ id: z.string().min(1) })
   .refine(insideGrid, "Tile outside the grid");
 
+const atlasTileParams = tileCoordinates.refine(insideGrid, "Tile outside the grid");
+/** The name the atlas goes by where a folder would give its id: no folder has it. */
+const ATLAS = "atlas";
+
 /** Ids of a folder and of everything below it. */
 const subtree = (id: string) => Prisma.sql`
   WITH RECURSIVE tree AS (
@@ -102,6 +106,116 @@ export function registerGeoPublicRoutes(app: FastifyInstance, deps: GeoPublicDep
       GROUP BY a.id, a.name, a."parentId"
       ORDER BY a.name`;
     return rows;
+  });
+
+  /** Changes whenever any municipality does: part of the address of the tiles of the atlas. */
+  const atlasVersion = async (fresh: boolean): Promise<string> => {
+    const known = versions.get(ATLAS);
+    if (!fresh && known?.value && Date.now() - known.at < VERSION_TTL_MS) return known.value;
+    const rows = await prisma.$queryRaw<{ count: number; last: number | null }[]>`
+      SELECT count(*)::int AS count, max(id) AS last FROM "GeoUnit"`;
+    const value = `${rows[0]?.count ?? 0}-${rows[0]?.last ?? 0}`;
+    versions.set(ATLAS, { value, at: Date.now() });
+    return value;
+  };
+
+  /**
+   * The atlas: every area a match can be played on, on one map. An area is a
+   * folder that holds municipalities of its own; each comes with its extent, a
+   * point to name it at and the areas it touches, so that neighbours can be told
+   * apart by colour.
+   */
+  app.get("/api/geo/atlas", async () => {
+    const version = await atlasVersion(true);
+    const areas = await prisma.$queryRaw<
+      {
+        id: string;
+        name: string;
+        rootId: string;
+        rootName: string;
+        unitCount: number;
+        lon: number;
+        lat: number;
+        bounds: number[];
+        borders: string[];
+      }[]
+    >`
+      WITH RECURSIVE up AS (
+        SELECT id AS leaf, id, "parentId", name FROM "GeoArea"
+        UNION ALL
+        SELECT up.leaf, parent.id, parent."parentId", parent.name
+        FROM "GeoArea" parent JOIN up ON up."parentId" = parent.id
+      ), root AS (
+        SELECT leaf, id, name FROM up WHERE "parentId" IS NULL
+      ), touching AS (
+        SELECT DISTINCT a."areaId" AS one, b."areaId" AS other
+        FROM "GeoAdjacency" adjacency
+        JOIN "GeoUnit" a ON a.id = adjacency."aId"
+        JOIN "GeoUnit" b ON b.id = adjacency."bId"
+        WHERE a."areaId" <> b."areaId"
+      )
+      SELECT area.id, area.name, root.id AS "rootId", root.name AS "rootName",
+        count(u.id)::int AS "unitCount",
+        round(((ST_XMin(ST_Extent(u.geom)) + ST_XMax(ST_Extent(u.geom))) / 2)::numeric, 5)::float8 AS lon,
+        round(((ST_YMin(ST_Extent(u.geom)) + ST_YMax(ST_Extent(u.geom))) / 2)::numeric, 5)::float8 AS lat,
+        ARRAY[ST_XMin(ST_Extent(u.geom)), ST_YMin(ST_Extent(u.geom)),
+          ST_XMax(ST_Extent(u.geom)), ST_YMax(ST_Extent(u.geom))] AS bounds,
+        ARRAY(
+          SELECT other FROM touching WHERE one = area.id
+          UNION SELECT one FROM touching WHERE other = area.id
+          ORDER BY 1
+        ) AS borders
+      FROM "GeoArea" area
+      JOIN root ON root.leaf = area.id
+      JOIN "GeoUnit" u ON u."areaId" = area.id
+      GROUP BY area.id, area.name, root.id, root.name
+      ORDER BY root.name, area.name`;
+    const extent = await prisma.$queryRaw<{ count: number; bounds: number[] | null }[]>`
+      SELECT count(*)::int AS count,
+        CASE WHEN count(*) = 0 THEN NULL ELSE ARRAY[
+          ST_XMin(ST_Extent(geom)), ST_YMin(ST_Extent(geom)),
+          ST_XMax(ST_Extent(geom)), ST_YMax(ST_Extent(geom))] END AS bounds
+      FROM "GeoUnit"`;
+    return {
+      map: {
+        id: ATLAS,
+        name: "",
+        unitCount: extent[0]?.count ?? 0,
+        bounds: extent[0]?.bounds ?? null,
+        version,
+        tiles: `/api/geo/atlas/tiles/{z}/{x}/{y}.mvt?v=${version}`,
+        minZoom: TILE_MIN_ZOOM,
+        maxZoom: TILE_MAX_ZOOM,
+        labelMinZoom: LABEL_MIN_ZOOM,
+      },
+      areas,
+    };
+  });
+
+  /** Which municipalities each area of the atlas holds: `{areaId: [unit id, …]}`. */
+  app.get("/api/geo/atlas/units", async (_request, reply) => {
+    const version = await atlasVersion(true);
+    const rows = await prisma.$queryRaw<{ areaId: string; ids: number[] }[]>`
+      SELECT "areaId", array_agg(id ORDER BY id) AS ids FROM "GeoUnit" GROUP BY "areaId"`;
+    return reply
+      .header("etag", `"${version}"`)
+      .header("cache-control", "no-cache")
+      .send(Object.fromEntries(rows.map((row) => [row.areaId, row.ids])));
+  });
+
+  /** The tiles of the atlas: every municipality there is, in the layers of any other tile. */
+  app.get("/api/geo/atlas/tiles/:z/:x/:y.mvt", async (request, reply) => {
+    const { z: zoom, x, y } = atlasTileParams.parse(request.params);
+    const requested = (request.query as { v?: string }).v;
+    const coordinates = `${zoom}/${x}/${y}`;
+    const known = requested ? cache.get(`${ATLAS}:${requested}:${coordinates}`) : undefined;
+    if (known) return sendTile(reply, known, true);
+
+    const version = await atlasVersion(false);
+    const tile = await cache.load(`${ATLAS}:${version}:${coordinates}`, () =>
+      generateTile(prisma, Prisma.sql`TRUE`, { zoom, x, y }),
+    );
+    return sendTile(reply, tile, requested === version);
   });
 
   /** What the map needs to show a folder: extent and tile address. */

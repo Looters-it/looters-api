@@ -161,6 +161,51 @@ describe.skipIf(!url)("public geography", () => {
     expect(tile.rawPayload.toString("latin1")).toContain("Lodi");
   });
 
+  it("draws the atlas: every area with municipalities of its own, and the areas it touches", async () => {
+    const { italy, north, upload, milano, monza } = await seed();
+    const south = await prisma.geoArea.create({ data: { name: "Sud", parentId: italy } });
+    const napoli = await unit(south.id, upload, "Napoli", 14.2, 40.8);
+    const island = await prisma.geoArea.create({ data: { name: "Isola", parentId: italy } });
+    const olbia = await unit(island.id, upload, "Olbia", 9.5, 40.9);
+    await prisma.geoAdjacency.create({ data: { aId: monza, bId: napoli } });
+
+    const atlas = (await app.inject("/api/geo/atlas")).json<{
+      map: { unitCount: number; tiles: string; version: string };
+      areas: {
+        id: string;
+        name: string;
+        rootId: string;
+        unitCount: number;
+        lon: number;
+        bounds: number[];
+        borders: string[];
+      }[];
+    }>();
+    expect(atlas.map.unitCount).toBe(4);
+    expect(atlas.map.tiles).toBe(`/api/geo/atlas/tiles/{z}/{x}/{y}.mvt?v=${atlas.map.version}`);
+    expect(atlas.areas.map((entry) => entry.name)).toEqual(["Isola", "Nord", "Sud"]);
+    const [islandArea, northArea, southArea] = atlas.areas;
+    if (!islandArea || !northArea || !southArea) throw new Error("three areas expected");
+    expect(northArea).toMatchObject({
+      id: north,
+      rootId: italy,
+      unitCount: 2,
+      borders: [south.id],
+    });
+    expect(southArea.borders).toEqual([north]);
+    expect(islandArea.borders).toEqual([]);
+    expect(northArea.bounds[0]).toBeCloseTo(9.1);
+    expect(northArea.lon).toBeCloseTo(9.2);
+
+    const units = (await app.inject("/api/geo/atlas/units")).json<Record<string, number[]>>();
+    expect(units).toEqual({ [north]: [milano, monza], [south.id]: [napoli], [island.id]: [olbia] });
+
+    const tile = await app.inject(atlas.map.tiles.replace("{z}/{x}/{y}", milanTile));
+    expect(tile.statusCode).toBe(200);
+    expect(tile.headers["cache-control"]).toContain("immutable");
+    expect(tile.rawPayload.toString("latin1")).toContain("Milano");
+  });
+
   it("rejects tiles outside the grid or the zoom range", async () => {
     const { italy } = await seed();
     for (const tile of ["9/999/0", "3/4/2", "13/0/0", "9/a/b"]) {
