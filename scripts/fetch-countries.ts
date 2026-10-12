@@ -38,6 +38,23 @@
  *   Liechtenstein, San Marino, Monaco (its quarters) and the Vatican: geoBoundaries, which
  *   republishes public domain and OpenStreetMap (ODbL) data. The microstates stay whole.
  *
+ * - United States (Census Bureau counties, public domain: the fifty states, with the
+ *   District of Columbia in Maryland's area; the territories are left out, and so are the
+ *   few Aleutian islands past the 180th meridian, which would stretch the map round the
+ *   world) and Mexico (INEGI municipalities, free use): Opendatasoft.
+ * - Canada: Statistics Canada's census subdivisions. Opendatasoft has them as a handful of
+ *   points each, too rough to share borders, so the shapes are those of geoBoundaries (2016),
+ *   which has lost their codes and mangled their names: those, and the province, are put
+ *   back from Opendatasoft's list (2021) by the point it gives inside each.
+ *
+ * - Eastern Europe, from geoBoundaries, which republishes official, OpenStreetMap (ODbL) and
+ *   public domain data of different years: Estonia, Latvia (parishes, in their
+ *   municipalities), Lithuania (elderships), Belarus and Ukraine (districts), Moldova,
+ *   Czechia, Slovakia, Hungary, Romania, Bulgaria, Slovenia, Croatia, Bosnia and Herzegovina,
+ *   Serbia, Montenegro, Kosovo, North Macedonia and Albania. Those it has no regions for
+ *   stay whole. For Czechia, Slovakia and Hungary, whose names it has spoilt, the names
+ *   are Eurostat's (GISCO, local administrative units 2024).
+ *
  * Where a source does not say the region of a municipality, it is the region whose
  * outline most of the municipality falls in.
  */
@@ -180,6 +197,108 @@ const boundaryUnit =
     geometry,
   });
 
+/** A name written all in capitals, with only its initials so. */
+const unshouted = (name: string) =>
+  // One of the two Slovenian regions comes without the name of the country.
+  name === "Vzhodna"
+    ? "Vzhodna Slovenija"
+    : name === name.toUpperCase()
+      ? name.toLowerCase().replace(/(^|[\s-])\p{L}/gu, (letter) => letter.toUpperCase())
+      : name;
+
+/**
+ * A country of geoBoundaries: its municipalities at one level and, when it has them,
+ * its regions at another, as shapes. Without regions it stays whole, under its name.
+ */
+function boundaries(iso: string, level: number, regionLevel: number | null, whole = ""): Source {
+  const file = (of: number) =>
+    `${GEOBOUNDARIES}/${iso}/ADM${String(of)}/geoBoundaries-${iso}-ADM${String(of)}.geojson`;
+  return {
+    url: file(level),
+    decimals: 4,
+    ...(regionLevel === null
+      ? {}
+      : { regions: { url: file(regionLevel), name: (p) => unshouted(text(p.shapeName)) } }),
+    unit: (feature) => {
+      const unit = boundaryUnit(whole)(feature);
+      // Without the words that only say it is a municipality, and not shouted.
+      const bare = unit.name
+        .replace(/^(Općina|Grad|Municipality of)\s+/i, "")
+        .replace(/\s+(Municipality|City)$/i, "");
+      unit.name = unshouted(bare);
+      return unit;
+    },
+  };
+}
+
+const EUROSTAT_LAU =
+  "https://gisco-services.ec.europa.eu/distribution/v2/lau/geojson/LAU_RG_01M_2024_4326.geojson";
+let eurostat: Promise<Feature[]> | null = null;
+
+/**
+ * Names and codes from Eurostat's local administrative units of 2024, for a country
+ * whose shapes come from a source that has spoilt them. Only the names are taken (its
+ * shapes may not be reused freely): each unit of Eurostat gives its name to the shape
+ * that holds most of a few points taken inside it.
+ */
+function namedByEurostat(country: string) {
+  return async (units: Unit[]): Promise<void> => {
+    eurostat ??= fromUrl(EUROSTAT_LAU);
+    const listed = (await eurostat).filter((feature) => feature.properties.CNTR_CODE === country);
+    const boxed = units.map((unit) => {
+      const rings = (polygons(unit.geometry) as Position[][][]).map((polygon) => polygon[0] ?? []);
+      const box: [number, number, number, number] = [Infinity, Infinity, -Infinity, -Infinity];
+      for (const [x, y] of rings.flat()) {
+        box[0] = Math.min(box[0], x);
+        box[1] = Math.min(box[1], y);
+        box[2] = Math.max(box[2], x);
+        box[3] = Math.max(box[3], y);
+      }
+      return { unit, rings, box, known: false };
+    });
+    for (const feature of listed) {
+      const ring = (polygons(feature.geometry) as Position[][][])
+        .map((polygon) => polygon[0] ?? [])
+        .sort((a, b) => b.length - a.length)[0];
+      if (!ring || ring.length === 0) continue;
+      const middle: Position = [
+        ring.reduce((sum, point) => sum + point[0], 0) / ring.length,
+        ring.reduce((sum, point) => sum + point[1], 0) / ring.length,
+      ];
+      // The middle, and points between it and the border all round.
+      const step = Math.max(1, Math.floor(ring.length / 8));
+      const points = [
+        middle,
+        ...ring
+          .filter((_, index) => index % step === 0)
+          .map((point): Position => [(point[0] + middle[0]) / 2, (point[1] + middle[1]) / 2]),
+      ];
+      const votes = new Map<(typeof boxed)[number], number>();
+      for (const [x, y] of points) {
+        const holder = boxed.find(
+          ({ rings, box, known }) =>
+            !known &&
+            x >= box[0] &&
+            y >= box[1] &&
+            x <= box[2] &&
+            y <= box[3] &&
+            rings.some((outer) => inside([x, y], outer)),
+        );
+        if (holder) votes.set(holder, (votes.get(holder) ?? 0) + 1);
+      }
+      const best = [...votes].sort((a, b) => b[1] - a[1])[0]?.[0];
+      if (!best) continue;
+      best.known = true;
+      best.unit.name = text(feature.properties.LAU_NAME);
+      best.unit.code = text(feature.properties.GISCO_ID) || best.unit.code;
+    }
+    const spoilt = boxed.filter(({ known }) => !known);
+    console.log(`  ${String(spoilt.length)} of ${String(units.length)} keep a spoilt name`);
+    // What no name was found for is told apart from the rest.
+    for (const { unit } of spoilt) unit.name = `? ${unit.name}`;
+  };
+}
+
 interface Source {
   /** A GeoJSON to download, */
   url?: string;
@@ -201,6 +320,8 @@ interface Source {
   };
   /** Decimals kept in the coordinates: five (a metre) unless the source is far heavier than needed. */
   decimals?: number;
+  /** Gives the units the names, codes and regions their source does not have. */
+  named?: (units: Unit[]) => Promise<void>;
   /** Territories that are not municipalities, from somewhere else. */
   more?: () => Promise<Unit[]>;
   unit: (feature: Feature) => Unit | null;
@@ -420,6 +541,69 @@ const COUNTRIES: Record<string, Source> = {
       return unit;
     },
   },
+  "united-states": {
+    url: `${ODS}/georef-united-states-of-america-county/exports/geojson`,
+    unit: ({ properties: p, geometry }) => {
+      const state = text(p.ste_name);
+      // The states are numbered to 56; what comes after are the territories.
+      if (Number(text(p.ste_code)) > 56) return null;
+      const east = (polygons(geometry) as Position[][][]).filter(
+        (polygon) => (polygon[0]?.[0]?.[0] ?? 0) < 0,
+      );
+      return {
+        name: text(p.coty_name),
+        code: text(p.coty_code),
+        region: ["District of Columbia", "Maryland"].includes(state)
+          ? "Maryland and District of Columbia"
+          : state,
+        within: state,
+        geometry: { type: "MultiPolygon", coordinates: east },
+      };
+    },
+  },
+  canada: {
+    url: `${GEOBOUNDARIES}/CAN/ADM3/geoBoundaries-CAN-ADM3.geojson`,
+    unit: boundaryUnit(""),
+    named: canadianNames,
+  },
+  mexico: {
+    url: `${ODS}/georef-mexico-municipality/exports/geojson`,
+    unit: ({ properties: p, geometry }) => ({
+      name: text(p.mun_name),
+      code: text(p.mun_code),
+      region: text(p.sta_name),
+      within: text(p.sta_name),
+      geometry,
+    }),
+  },
+  estonia: boundaries("EST", 2, 1),
+  // Latvia's municipalities would be forty regions, some of one parish: it stays whole.
+  latvia: boundaries("LVA", 2, null, "Latvija"),
+  lithuania: boundaries("LTU", 3, 1),
+  belarus: boundaries("BLR", 2, 1),
+  ukraine: boundaries("UKR", 2, 1),
+  moldova: boundaries("MDA", 1, null, "Moldova"),
+  // geoBoundaries has the names of these three mangled past mending: Eurostat's are used.
+  czechia: { ...boundaries("CZE", 3, 1), named: namedByEurostat("CZ") },
+  slovakia: { ...boundaries("SVK", 3, 1), named: namedByEurostat("SK") },
+  hungary: { ...boundaries("HUN", 3, 1), named: namedByEurostat("HU") },
+  romania: boundaries("ROU", 2, 1),
+  bulgaria: boundaries("BGR", 2, 1),
+  slovenia: boundaries("SVN", 2, 1),
+  croatia: boundaries("HRV", 2, 1),
+  "bosnia-and-herzegovina": {
+    ...boundaries("BIH", 3, 1),
+    url: "https://github.com/wmgeolab/geoBoundaries/raw/f549eab/releaseData/gbOpen/BIH/ADM3/geoBoundaries-BIH-ADM3.geojson",
+    regions: {
+      url: "https://github.com/wmgeolab/geoBoundaries/raw/90a1d52/releaseData/gbOpen/BIH/ADM1/geoBoundaries-BIH-ADM1.geojson",
+      name: (p) => text(p.shapeName),
+    },
+  },
+  serbia: boundaries("SRB", 2, 1),
+  montenegro: boundaries("MNE", 1, null, "Crna Gora"),
+  kosovo: boundaries("XKX", 2, null, "Kosovo"),
+  "north-macedonia": boundaries("MKD", 2, 1),
+  albania: boundaries("ALB", 3, 1),
   andorra: {
     url: `${GEOBOUNDARIES}/AND/ADM1/geoBoundaries-AND-ADM1.geojson`,
     unit: boundaryUnit("Andorra"),
@@ -495,6 +679,92 @@ const OVERPASS = [
   "https://overpass-api.de/api/interpreter",
   "https://overpass.private.coffee/api/interpreter",
 ];
+
+/**
+ * The Canadian census subdivisions as Opendatasoft lists them, each with a point inside
+ * it: the subdivision of geoBoundaries that holds the point takes its name, code and
+ * province. One that holds none (the two lists are five years apart) keeps its own name,
+ * mended, and takes the province of the nearest point.
+ */
+async function canadianNames(units: Unit[]): Promise<void> {
+  const response = await fetch(
+    `${ODS}/georef-canada-census-subdivision/exports/json?select=csd_code,csd_name_en,prov_name_en,geo_point_2d`,
+  );
+  const listed = (await response.json()) as {
+    csd_code: unknown;
+    csd_name_en: unknown;
+    prov_name_en: unknown;
+    geo_point_2d: { lon: number; lat: number };
+  }[];
+  const boxed = units.map((unit) => {
+    const rings = (polygons(unit.geometry) as Position[][][]).map((polygon) => polygon[0] ?? []);
+    const box: [number, number, number, number] = [Infinity, Infinity, -Infinity, -Infinity];
+    for (const [x, y] of rings.flat()) {
+      box[0] = Math.min(box[0], x);
+      box[1] = Math.min(box[1], y);
+      box[2] = Math.max(box[2], x);
+      box[3] = Math.max(box[3], y);
+    }
+    return { unit, rings, box, known: false };
+  });
+  // Accents read as two letters each, and long names cut short with a star.
+  const mended = (name: string) =>
+    (name.includes("Ã") ? Buffer.from(name, "latin1").toString("utf8") : name).replace(
+      /[-\s]*\*$/,
+      "",
+    );
+  const plain = (name: string) => name.toLowerCase().replace(/\s+/g, " ").trim();
+  const far = (row: (typeof listed)[number], box: number[]) =>
+    Math.hypot(
+      row.geo_point_2d.lon - ((box[0] ?? 0) + (box[2] ?? 0)) / 2,
+      row.geo_point_2d.lat - ((box[1] ?? 0) + (box[3] ?? 0)) / 2,
+    );
+  const take = (holder: (typeof boxed)[number], row: (typeof listed)[number]) => {
+    holder.known = true;
+    holder.unit.name = text(row.csd_name_en);
+    holder.unit.code = text(row.csd_code);
+    holder.unit.region = text(row.prov_name_en);
+    holder.unit.within = holder.unit.region;
+  };
+  // First by name, the nearest of those so called and not far: the point of a small
+  // place may fall just outside it, in the wide land around.
+  const byName = new Map<string, (typeof boxed)[number][]>();
+  for (const entry of boxed) {
+    const key = plain(mended(entry.unit.name)).slice(0, 24);
+    byName.set(key, [...(byName.get(key) ?? []), entry]);
+  }
+  const unplaced: typeof listed = [];
+  for (const row of listed) {
+    const same = (byName.get(plain(text(row.csd_name_en)).slice(0, 24)) ?? [])
+      .filter((entry) => !entry.known && far(row, entry.box) < 0.5)
+      .sort((a, b) => far(row, a.box) - far(row, b.box))[0];
+    if (same) take(same, row);
+    else unplaced.push(row);
+  }
+  // Then by the point: the subdivision that holds it, if it has no name yet.
+  for (const row of unplaced) {
+    const point: Position = [row.geo_point_2d.lon, row.geo_point_2d.lat];
+    const holder = boxed.find(
+      ({ rings, box, known }) =>
+        !known &&
+        point[0] >= box[0] &&
+        point[1] >= box[1] &&
+        point[0] <= box[2] &&
+        point[1] <= box[3] &&
+        rings.some((ring) => inside(point, ring)),
+    );
+    if (holder) take(holder, row);
+  }
+  for (const { unit, box, known } of boxed) {
+    if (known) continue;
+    const nearest = listed.reduce((best, row) => (far(row, box) < far(best, box) ? row : best));
+    unit.name = mended(unit.name);
+    unit.region = text(nearest.prov_name_en);
+    unit.within = unit.region;
+  }
+  const older = boxed.filter(({ known }) => !known).length;
+  console.log(`  ${String(older)} keep the name of the older list`);
+}
 
 type Position = [number, number];
 interface OsmRelation {
@@ -684,6 +954,7 @@ for (const [country, source] of Object.entries(COUNTRIES)) {
       console.log(`  in no region: ${lost.map((unit) => unit.name).join(", ")}`);
     }
   }
+  await source.named?.(units);
   units.push(...((await source.more?.()) ?? []));
   if (source.land) {
     const land = (await fromUrl(source.land.url)).filter((feature) =>

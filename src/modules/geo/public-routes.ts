@@ -30,6 +30,12 @@ const tileParams = tileCoordinates
 const OUTLINE_MIN_PART = 0.0002;
 /** How far a simplified outline may stray from the border, in degrees (about 400 m). */
 const OUTLINE_TOLERANCE = 0.004;
+/** A part is also left out when it is less than this share of its area. */
+const OUTLINE_MIN_SHARE = 0.0005;
+/** An outline is drawn no finer than its extent divided by this. */
+const OUTLINE_STEPS = 800;
+/** Changed whenever the way outlines are drawn does, so that the kept ones are drawn again. */
+const OUTLINE_DRAWING = "3:";
 
 /** Ids of a folder and of everything below it. */
 const subtree = (id: string) => Prisma.sql`
@@ -120,26 +126,32 @@ export function registerGeoPublicRoutes(app: FastifyInstance, deps: GeoPublicDep
       const stale = await prisma.$queryRaw<{ id: string; made: string }[]>`
         SELECT area.id, own.made
         FROM "GeoArea" area JOIN (
-          SELECT "areaId", count(*) || '-' || max(id) || '-' || sum(id) AS made
+          SELECT "areaId", ${OUTLINE_DRAWING} || count(*) || '-' || max(id) || '-' || sum(id) AS made
           FROM "GeoUnit" GROUP BY "areaId"
         ) own ON own."areaId" = area.id
         WHERE area."outlineOf" IS DISTINCT FROM own.made`;
       for (const { id, made } of stale) {
         // Small islands are left out, unless the area is nothing else; the rest is
-        // simplified to what can be told apart with a whole region in view.
+        // simplified to what can be told apart with the whole area in view. Both grow
+        // with the area: a province of the Arctic is not drawn like a canton.
         await prisma.$executeRaw`
           WITH parts AS (
             SELECT (ST_Dump(ST_Union("geomSimple"))).geom AS part
             FROM "GeoUnit" WHERE "areaId" = ${id}
+          ), whole AS (
+            SELECT surface, sqrt(power(ST_XMax(box) - ST_XMin(box), 2)
+              + power(ST_YMax(box) - ST_YMin(box), 2)) AS span
+            FROM (SELECT sum(ST_Area(part)) AS surface, ST_Extent(part) AS box FROM parts) all_parts
           ), kept AS (
-            SELECT part FROM parts
-            WHERE ST_Area(part) > ${OUTLINE_MIN_PART}::float8
+            SELECT part FROM parts, whole
+            WHERE ST_Area(part) > greatest(${OUTLINE_MIN_PART}::float8, whole.surface * ${OUTLINE_MIN_SHARE}::float8)
               OR part = (SELECT part FROM parts ORDER BY ST_Area(part) DESC LIMIT 1)
           )
           UPDATE "GeoArea" SET "outlineOf" = ${made}, outline = (
             SELECT ST_AsGeoJSON(
-              ST_SimplifyPreserveTopology(ST_Collect(part), ${OUTLINE_TOLERANCE}::float8), 4)
-            FROM kept)
+              ST_SimplifyPreserveTopology(ST_Collect(part), greatest(
+                ${OUTLINE_TOLERANCE}::float8, whole.span / ${OUTLINE_STEPS}::float8)), 4)
+            FROM kept, whole GROUP BY whole.span)
           WHERE id = ${id}`;
       }
     })().finally(() => {
