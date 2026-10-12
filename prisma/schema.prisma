@@ -153,6 +153,10 @@ model GeoArea {
   uploads   GeoUpload[]
   units     GeoUnit[]
   matches   MatchArea[]
+  // The outline of its own municipalities for the atlas, as a GeoJSON geometry, and the
+  // municipalities it was drawn from (count, last and sum of their ids): drawn again when they change.
+  outline   String?
+  outlineOf String?
   createdAt DateTime    @default(now())
 
   @@index([parentId])

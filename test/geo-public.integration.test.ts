@@ -162,15 +162,16 @@ describe.skipIf(!url)("public geography", () => {
   });
 
   it("draws the atlas: every area with municipalities of its own, and the areas it touches", async () => {
-    const { italy, north, upload, milano, monza } = await seed();
+    const { italy, north, upload, monza } = await seed();
     const south = await prisma.geoArea.create({ data: { name: "Sud", parentId: italy } });
     const napoli = await unit(south.id, upload, "Napoli", 14.2, 40.8);
     const island = await prisma.geoArea.create({ data: { name: "Isola", parentId: italy } });
-    const olbia = await unit(island.id, upload, "Olbia", 9.5, 40.9);
+    await unit(island.id, upload, "Olbia", 9.5, 40.9);
     await prisma.geoAdjacency.create({ data: { aId: monza, bId: napoli } });
 
     const atlas = (await app.inject("/api/geo/atlas")).json<{
-      map: { unitCount: number; tiles: string; version: string };
+      unitCount: number;
+      bounds: number[];
       areas: {
         id: string;
         name: string;
@@ -179,10 +180,12 @@ describe.skipIf(!url)("public geography", () => {
         lon: number;
         bounds: number[];
         borders: string[];
+        outline: { type: string; coordinates: number[][][][] };
       }[];
     }>();
-    expect(atlas.map.unitCount).toBe(4);
-    expect(atlas.map.tiles).toBe(`/api/geo/atlas/tiles/{z}/{x}/{y}.mvt?v=${atlas.map.version}`);
+    expect(atlas.unitCount).toBe(4);
+    expect(atlas.bounds[0]).toBeCloseTo(9.1);
+    expect(atlas.bounds[3]).toBeCloseTo(45.6);
     expect(atlas.areas.map((entry) => entry.name)).toEqual(["Isola", "Nord", "Sud"]);
     const [islandArea, northArea, southArea] = atlas.areas;
     if (!islandArea || !northArea || !southArea) throw new Error("three areas expected");
@@ -194,16 +197,20 @@ describe.skipIf(!url)("public geography", () => {
     });
     expect(southArea.borders).toEqual([north]);
     expect(islandArea.borders).toEqual([]);
-    expect(northArea.bounds[0]).toBeCloseTo(9.1);
     expect(northArea.lon).toBeCloseTo(9.2);
+    // One outline for the area, not one for each municipality: the two squares that
+    // touch at a corner are its two parts.
+    expect(northArea.outline.type).toBe("MultiPolygon");
+    expect(northArea.outline.coordinates).toHaveLength(2);
+    expect(islandArea.outline.coordinates).toHaveLength(1);
 
-    const units = (await app.inject("/api/geo/atlas/units")).json<Record<string, number[]>>();
-    expect(units).toEqual({ [north]: [milano, monza], [south.id]: [napoli], [island.id]: [olbia] });
-
-    const tile = await app.inject(atlas.map.tiles.replace("{z}/{x}/{y}", milanTile));
-    expect(tile.statusCode).toBe(200);
-    expect(tile.headers["cache-control"]).toContain("immutable");
-    expect(tile.rawPayload.toString("latin1")).toContain("Milano");
+    // A municipality more, and the outline of its area is drawn again.
+    await unit(island.id, upload, "Arzachena", 9.6, 40.9);
+    const again = (await app.inject("/api/geo/atlas")).json<typeof atlas>();
+    const wider = again.areas.find((entry) => entry.id === island.id);
+    expect(wider?.unitCount).toBe(2);
+    expect(wider?.bounds[2]).toBeCloseTo(9.7);
+    expect(JSON.stringify(wider?.outline)).not.toBe(JSON.stringify(islandArea.outline));
   });
 
   it("rejects tiles outside the grid or the zoom range", async () => {

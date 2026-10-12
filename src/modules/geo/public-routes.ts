@@ -26,9 +26,10 @@ const tileParams = tileCoordinates
   .extend({ id: z.string().min(1) })
   .refine(insideGrid, "Tile outside the grid");
 
-const atlasTileParams = tileCoordinates.refine(insideGrid, "Tile outside the grid");
-/** The name the atlas goes by where a folder would give its id: no folder has it. */
-const ATLAS = "atlas";
+/** Parts of an outline smaller than this are left out, in square degrees (about two km²). */
+const OUTLINE_MIN_PART = 0.0002;
+/** How far a simplified outline may stray from the border, in degrees (about 400 m). */
+const OUTLINE_TOLERANCE = 0.004;
 
 /** Ids of a folder and of everything below it. */
 const subtree = (id: string) => Prisma.sql`
@@ -108,26 +109,63 @@ export function registerGeoPublicRoutes(app: FastifyInstance, deps: GeoPublicDep
     return rows;
   });
 
-  /** Changes whenever any municipality does: part of the address of the tiles of the atlas. */
-  const atlasVersion = async (fresh: boolean): Promise<string> => {
-    const known = versions.get(ATLAS);
-    if (!fresh && known?.value && Date.now() - known.at < VERSION_TTL_MS) return known.value;
-    const rows = await prisma.$queryRaw<{ count: number; last: number | null }[]>`
-      SELECT count(*)::int AS count, max(id) AS last FROM "GeoUnit"`;
-    const value = `${rows[0]?.count ?? 0}-${rows[0]?.last ?? 0}`;
-    versions.set(ATLAS, { value, at: Date.now() });
-    return value;
+  /**
+   * Draws again the outline of every area whose municipalities have changed since it
+   * was drawn. Joining thousands of borders takes seconds, so the outline is kept on
+   * the folder; whoever asks while it is being drawn waits for the same work.
+   */
+  let drawing: Promise<void> | null = null;
+  const drawOutlines = (): Promise<void> => {
+    drawing ??= (async () => {
+      const stale = await prisma.$queryRaw<{ id: string; made: string }[]>`
+        SELECT area.id, own.made
+        FROM "GeoArea" area JOIN (
+          SELECT "areaId", count(*) || '-' || max(id) || '-' || sum(id) AS made
+          FROM "GeoUnit" GROUP BY "areaId"
+        ) own ON own."areaId" = area.id
+        WHERE area."outlineOf" IS DISTINCT FROM own.made`;
+      for (const { id, made } of stale) {
+        // Small islands are left out, unless the area is nothing else; the rest is
+        // simplified to what can be told apart with a whole region in view.
+        await prisma.$executeRaw`
+          WITH parts AS (
+            SELECT (ST_Dump(ST_Union("geomSimple"))).geom AS part
+            FROM "GeoUnit" WHERE "areaId" = ${id}
+          ), kept AS (
+            SELECT part FROM parts
+            WHERE ST_Area(part) > ${OUTLINE_MIN_PART}::float8
+              OR part = (SELECT part FROM parts ORDER BY ST_Area(part) DESC LIMIT 1)
+          )
+          UPDATE "GeoArea" SET "outlineOf" = ${made}, outline = (
+            SELECT ST_AsGeoJSON(
+              ST_SimplifyPreserveTopology(ST_Collect(part), ${OUTLINE_TOLERANCE}::float8), 4)
+            FROM kept)
+          WHERE id = ${id}`;
+      }
+    })().finally(() => {
+      drawing = null;
+    });
+    return drawing;
   };
 
   /**
    * The atlas: every area a match can be played on, on one map. An area is a
-   * folder that holds municipalities of its own; each comes with its extent, a
-   * point to name it at and the areas it touches, so that neighbours can be told
-   * apart by colour.
+   * folder that holds municipalities of its own; each comes with its outline, its
+   * extent, a point to name it at and the areas it touches, so that neighbours can
+   * be told apart by colour. The municipalities themselves are not sent.
    */
+  let atlas: { of: string; body: unknown } | null = null;
   app.get("/api/geo/atlas", async () => {
-    const version = await atlasVersion(true);
-    const areas = await prisma.$queryRaw<
+    await drawOutlines();
+    // The answer is put together once for each state of folders and municipalities.
+    const state = await prisma.$queryRaw<{ of: string }[]>`
+      SELECT md5(coalesce(string_agg(
+        id || ':' || name || ':' || coalesce("parentId", '') || ':' || coalesce("outlineOf", ''),
+        '|' ORDER BY id), '')) AS of
+      FROM "GeoArea"`;
+    const of = state[0]?.of ?? "";
+    if (atlas?.of === of) return atlas.body;
+    const rows = await prisma.$queryRaw<
       {
         id: string;
         name: string;
@@ -138,6 +176,7 @@ export function registerGeoPublicRoutes(app: FastifyInstance, deps: GeoPublicDep
         lat: number;
         bounds: number[];
         borders: string[];
+        outline: string | null;
       }[]
     >`
       WITH RECURSIVE up AS (
@@ -164,58 +203,33 @@ export function registerGeoPublicRoutes(app: FastifyInstance, deps: GeoPublicDep
           SELECT other FROM touching WHERE one = area.id
           UNION SELECT one FROM touching WHERE other = area.id
           ORDER BY 1
-        ) AS borders
+        ) AS borders,
+        area.outline
       FROM "GeoArea" area
       JOIN root ON root.leaf = area.id
       JOIN "GeoUnit" u ON u."areaId" = area.id
-      GROUP BY area.id, area.name, root.id, root.name
+      GROUP BY area.id, area.name, root.id, root.name, area.outline
       ORDER BY root.name, area.name`;
-    const extent = await prisma.$queryRaw<{ count: number; bounds: number[] | null }[]>`
-      SELECT count(*)::int AS count,
-        CASE WHEN count(*) = 0 THEN NULL ELSE ARRAY[
-          ST_XMin(ST_Extent(geom)), ST_YMin(ST_Extent(geom)),
-          ST_XMax(ST_Extent(geom)), ST_YMax(ST_Extent(geom))] END AS bounds
-      FROM "GeoUnit"`;
-    return {
-      map: {
-        id: ATLAS,
-        name: "",
-        unitCount: extent[0]?.count ?? 0,
-        bounds: extent[0]?.bounds ?? null,
-        version,
-        tiles: `/api/geo/atlas/tiles/{z}/{x}/{y}.mvt?v=${version}`,
-        minZoom: TILE_MIN_ZOOM,
-        maxZoom: TILE_MAX_ZOOM,
-        labelMinZoom: LABEL_MIN_ZOOM,
-      },
+    const areas = rows.flatMap((row) =>
+      row.outline ? [{ ...row, outline: JSON.parse(row.outline) as unknown }] : [],
+    );
+    const all = areas.map((area) => area.bounds);
+    const body = {
+      unitCount: areas.reduce((sum, area) => sum + area.unitCount, 0),
+      /** [west, south, east, north] of everything; null while there is nothing. */
+      bounds:
+        all.length === 0
+          ? null
+          : [
+              Math.min(...all.map((box) => box[0] ?? 0)),
+              Math.min(...all.map((box) => box[1] ?? 0)),
+              Math.max(...all.map((box) => box[2] ?? 0)),
+              Math.max(...all.map((box) => box[3] ?? 0)),
+            ],
       areas,
     };
-  });
-
-  /** Which municipalities each area of the atlas holds: `{areaId: [unit id, …]}`. */
-  app.get("/api/geo/atlas/units", async (_request, reply) => {
-    const version = await atlasVersion(true);
-    const rows = await prisma.$queryRaw<{ areaId: string; ids: number[] }[]>`
-      SELECT "areaId", array_agg(id ORDER BY id) AS ids FROM "GeoUnit" GROUP BY "areaId"`;
-    return reply
-      .header("etag", `"${version}"`)
-      .header("cache-control", "no-cache")
-      .send(Object.fromEntries(rows.map((row) => [row.areaId, row.ids])));
-  });
-
-  /** The tiles of the atlas: every municipality there is, in the layers of any other tile. */
-  app.get("/api/geo/atlas/tiles/:z/:x/:y.mvt", async (request, reply) => {
-    const { z: zoom, x, y } = atlasTileParams.parse(request.params);
-    const requested = (request.query as { v?: string }).v;
-    const coordinates = `${zoom}/${x}/${y}`;
-    const known = requested ? cache.get(`${ATLAS}:${requested}:${coordinates}`) : undefined;
-    if (known) return sendTile(reply, known, true);
-
-    const version = await atlasVersion(false);
-    const tile = await cache.load(`${ATLAS}:${version}:${coordinates}`, () =>
-      generateTile(prisma, Prisma.sql`TRUE`, { zoom, x, y }),
-    );
-    return sendTile(reply, tile, requested === version);
+    atlas = { of, body };
+    return body;
   });
 
   /** What the map needs to show a folder: extent and tile address. */
