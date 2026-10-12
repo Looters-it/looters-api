@@ -27,10 +27,19 @@
  *   larger ones a territory with the small ones around it.
  * - Faroe Islands, Iceland, Greenland: the municipalities as drawn in OpenStreetMap
  *   (© OpenStreetMap contributors, ODbL), asked to Overpass. No official source gives all
- *   three in a form that can be read here; the few municipalities they have are not split
- *   into regions. The Greenlandic ones are drawn there with straight lines out at sea, so
+ *   three in a form that can be read here. The Greenlandic ones are drawn there with straight lines out at sea, so
  *   they are cut along the coast of Natural Earth (public domain), and the land that no
  *   municipality has, the national park of the north-east, is added as a territory.
+ * - Sweden (Lantmäteriet, CC0), Germany (BKG, Data licence Germany 2.0; the land without a
+ *   municipality is kept as territories), Belgium (NGI), the Netherlands (CBS/Kadaster 2021,
+ *   CC0), Spain (IGN, CC BY 4.0) and Portugal (DGT, its 308 municipalities): Opendatasoft.
+ * - Finland: Statistics Finland's municipalities and regions at 1:1,000,000, CC BY 4.0.
+ * - Luxembourg (its government's communes of 2018; cantons from OpenStreetMap), Andorra,
+ *   Liechtenstein, San Marino, Monaco (its quarters) and the Vatican: geoBoundaries, which
+ *   republishes public domain and OpenStreetMap (ODbL) data. The microstates stay whole.
+ *
+ * Where a source does not say the region of a municipality, it is the region whose
+ * outline most of the municipality falls in.
  */
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -127,6 +136,32 @@ const osmUnit =
 const NATURAL_EARTH =
   "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_10m_admin_0_countries.geojson";
 
+/**
+ * The German city states are one or two municipalities: each goes with the state
+ * around it, and both states are named.
+ */
+const GERMAN_CITY_STATES: Record<string, string> = {
+  Berlin: "Berlin und Brandenburg",
+  Brandenburg: "Berlin und Brandenburg",
+  Bremen: "Niedersachsen und Bremen",
+  Niedersachsen: "Niedersachsen und Bremen",
+  Hamburg: "Schleswig-Holstein und Hamburg",
+  "Schleswig-Holstein": "Schleswig-Holstein und Hamburg",
+};
+const STAT_FI =
+  "https://geo.stat.fi/geoserver/tilastointialueet/wfs?service=WFS&version=2.0.0&request=GetFeature&outputFormat=application/json&srsName=EPSG:4326&typeName=tilastointialueet";
+const GEOBOUNDARIES = "https://github.com/wmgeolab/geoBoundaries/raw/9469f09/releaseData/gbOpen";
+/** A unit of geoBoundaries, which names it and numbers it the same way for every country. */
+const boundaryUnit =
+  (region: string) =>
+  ({ properties: p, geometry }: Feature): Unit => ({
+    name: text(p.shapeName),
+    code: text(p.shapeID),
+    region,
+    within: text(p.shapeID),
+    geometry,
+  });
+
 interface Source {
   /** A GeoJSON to download, */
   url?: string;
@@ -137,6 +172,15 @@ interface Source {
    * and its largest part that none of them has becomes a territory called `rest`.
    */
   land?: { url: string; is: (properties: Record<string, unknown>) => boolean; rest: string };
+  /**
+   * The regions as shapes, for a source that does not name the region of a municipality:
+   * each goes to the one most of it falls in.
+   */
+  regions?: {
+    url?: string;
+    overpass?: string;
+    name: (properties: Record<string, unknown>) => string;
+  };
   /** Territories that are not municipalities, from somewhere else. */
   more?: () => Promise<Unit[]>;
   unit: (feature: Feature) => Unit | null;
@@ -202,10 +246,18 @@ const COUNTRIES: Record<string, Source> = {
   },
   "faroe-islands": {
     overpass: `area["ISO3166-1"="FO"][admin_level=2]->.a;relation(area.a)[boundary=administrative][admin_level=7];`,
+    regions: {
+      overpass: `area["ISO3166-1"="FO"][admin_level=2]->.a;relation(area.a)[boundary=administrative][admin_level=6];`,
+      name: (p) => text(p.name),
+    },
     unit: osmUnit("Føroyar"),
   },
   iceland: {
     overpass: `area["ISO3166-1"="IS"][admin_level=2]->.a;relation(area.a)[boundary=administrative][admin_level=6];`,
+    regions: {
+      overpass: `area["ISO3166-1"="IS"][admin_level=2]->.a;relation(area.a)[boundary=administrative][admin_level=5];`,
+      name: (p) => text(p.name),
+    },
     unit: osmUnit("Ísland"),
   },
   greenland: {
@@ -216,6 +268,116 @@ const COUNTRIES: Record<string, Source> = {
       rest: "Kalaallit Nunaanni nuna eqqissisimatitaq",
     },
     unit: osmUnit("Kalaallit Nunaat"),
+  },
+  sweden: {
+    url: `${ODS}/georef-sweden-kommun/exports/geojson`,
+    unit: ({ properties: p, geometry }) => ({
+      name: text(p.kom_name),
+      code: text(p.kom_code),
+      region: text(p.lan_name),
+      within: text(p.lan_name),
+      geometry,
+    }),
+  },
+  finland: {
+    url: `${STAT_FI}:kunta1000k`,
+    regions: { url: `${STAT_FI}:maakunta1000k`, name: (p) => text(p.nimi) },
+    unit: ({ properties: p, geometry }) => ({
+      name: text(p.nimi),
+      code: text(p.kunta),
+      region: "",
+      within: text(p.kunta),
+      geometry,
+    }),
+  },
+  germany: {
+    url: `${ODS}/georef-germany-gemeinde/exports/geojson`,
+    unit: ({ properties: p, geometry }) => ({
+      name: text(p.gem_name_short) || text(p.gem_name),
+      code: text(p.gem_code),
+      region: GERMAN_CITY_STATES[text(p.lan_name)] ?? text(p.lan_name),
+      within: text(p.krs_name),
+      geometry,
+    }),
+  },
+  belgium: {
+    url: `${ODS}/georef-belgium-municipality/exports/geojson`,
+    unit: ({ properties: p, geometry }) => {
+      // Each municipality and region under the name of its own language.
+      const dutch = text(p.reg_code) === "02000";
+      const own = dutch ? "nl" : text(p.mun_off_language) === "DE" ? "de" : "fr";
+      return {
+        name: text(p[`mun_name_${own}`]),
+        code: text(p.mun_code),
+        region: text(p[dutch ? "reg_name_nl" : "reg_name_fr"]),
+        within: text(p[dutch ? "prov_name_nl" : "prov_name_fr"]),
+        geometry,
+      };
+    },
+  },
+  netherlands: {
+    url: `${ODS}/georef-netherlands-gemeente/exports/geojson`,
+    unit: ({ properties: p, geometry }) => ({
+      name: text(p.gem_name),
+      code: text(p.gem_code),
+      region: text(p.prov_name),
+      within: text(p.prov_name),
+      geometry,
+    }),
+  },
+  spain: {
+    url: `${ODS}/georef-spain-municipio/exports/geojson`,
+    unit: ({ properties: p, geometry }) => {
+      const community = text(p.acom_name);
+      // The rocks off Africa and the pastures shared with France belong to no community.
+      if (community.startsWith("Territorio no asociado")) return null;
+      return {
+        name: text(p.mun_name),
+        code: text(p.mun_code),
+        // The two cities in Africa are one municipality each: one area for both.
+        region: community.startsWith("Ciudad Autónoma") ? "Ceuta y Melilla" : community,
+        within: text(p.prov_name),
+        geometry,
+      };
+    },
+  },
+  portugal: {
+    url: `${ODS}/georef-portugal-concelho/exports/geojson`,
+    unit: ({ properties: p, geometry }) => ({
+      name: text(p.con_name),
+      code: text(p.con_code),
+      region: text(p.dis_name),
+      within: text(p.dis_name),
+      geometry,
+    }),
+  },
+  luxembourg: {
+    url: `${GEOBOUNDARIES}/LUX/ADM3/geoBoundaries-LUX-ADM3.geojson`,
+    regions: {
+      url: `${GEOBOUNDARIES}/LUX/ADM1/geoBoundaries-LUX-ADM1.geojson`,
+      name: (p) => text(p.shapeName),
+    },
+    unit: boundaryUnit(""),
+  },
+  andorra: {
+    url: `${GEOBOUNDARIES}/AND/ADM1/geoBoundaries-AND-ADM1.geojson`,
+    unit: boundaryUnit("Andorra"),
+  },
+  liechtenstein: {
+    url: `${GEOBOUNDARIES}/LIE/ADM1/geoBoundaries-LIE-ADM1.geojson`,
+    unit: boundaryUnit("Liechtenstein"),
+  },
+  "san-marino": {
+    url: `${GEOBOUNDARIES}/SMR/ADM1/geoBoundaries-SMR-ADM1.geojson`,
+    unit: boundaryUnit("San Marino"),
+  },
+  monaco: {
+    url: `${GEOBOUNDARIES}/MCO/ADM2/geoBoundaries-MCO-ADM2.geojson`,
+    unit: boundaryUnit("Monaco"),
+  },
+  vatican: {
+    url: `${GEOBOUNDARIES}/VAT/ADM0/geoBoundaries-VAT-ADM0.geojson`,
+    unit: boundaryUnit("Città del Vaticano"),
   },
 };
 
@@ -264,11 +426,13 @@ async function arcticIslands(): Promise<Unit[]> {
   }));
 }
 
-/** The servers that answer Overpass queries: the next is tried when one is busy. */
+/**
+ * The servers that answer Overpass queries: the next is tried when one is busy. Only
+ * those that keep up with OpenStreetMap: one that lagged gave four municipalities fewer.
+ */
 const OVERPASS = [
   "https://overpass-api.de/api/interpreter",
   "https://overpass.private.coffee/api/interpreter",
-  "https://overpass.kumi.systems/api/interpreter",
 ];
 
 type Position = [number, number];
@@ -328,12 +492,13 @@ function osmFeature(relation: OsmRelation): Feature {
 
 /** The public servers are often busy: each is tried in turn, a few times round. */
 async function fromOverpass(query: string): Promise<Feature[]> {
-  for (let round = 0; round < 4; round++) {
+  for (let round = 0; round < 8; round++) {
     for (const server of OVERPASS) {
       const response = await fetch(server, {
         method: "POST",
         headers: { "user-agent": "looters-geodata/1.0 (areas fetch script)" },
         body: new URLSearchParams({ data: `[out:json][timeout:180];${query}out geom;` }),
+        signal: AbortSignal.timeout(240_000),
       }).catch(() => null);
       const answer = response?.ok ? await response.text() : "";
       if (answer.startsWith("{")) {
@@ -394,7 +559,35 @@ for (const [country, source] of Object.entries(COUNTRIES)) {
       };
     }
   }
-  const units = [...byCode.values(), ...((await source.more?.()) ?? [])];
+  const units = [...byCode.values()];
+  if (source.regions) {
+    const shapes = source.regions.overpass
+      ? await fromOverpass(source.regions.overpass)
+      : await fromUrl(source.regions.url ?? "");
+    const named = shapes.map((shape) => ({
+      name: source.regions?.name(shape.properties) ?? "",
+      outers: polygons(shape.geometry).map((polygon) => (polygon as Position[][])[0] ?? []),
+    }));
+    for (const unit of units) {
+      // Some points of its border, spread along it: the region that holds most of them.
+      const border = polygons(unit.geometry)
+        .map((polygon) => (polygon as Position[][])[0] ?? [])
+        .sort((a, b) => b.length - a.length)[0];
+      const step = Math.max(1, Math.floor((border?.length ?? 0) / 40));
+      const sample = (border ?? []).filter((_, index) => index % step === 0);
+      const votes = named.map(
+        (region) =>
+          sample.filter((point) => region.outers.some((outer) => inside(point, outer))).length,
+      );
+      const best = votes.indexOf(Math.max(...votes));
+      unit.region = (votes[best] ?? 0) > 0 ? (named[best]?.name ?? "") : "";
+    }
+    const lost = units.filter((unit) => !unit.region);
+    if (lost.length > 0) {
+      console.log(`  in no region: ${lost.map((unit) => unit.name).join(", ")}`);
+    }
+  }
+  units.push(...((await source.more?.()) ?? []));
   if (source.land) {
     const land = (await fromUrl(source.land.url)).filter((feature) =>
       source.land?.is(feature.properties),
@@ -433,7 +626,7 @@ for (const [country, source] of Object.entries(COUNTRIES)) {
   for (const unit of units) times.set(unit.name, (times.get(unit.name) ?? 0) + 1);
   const regions: Record<string, string[]> = {};
   const features = units.map((unit) => {
-    (regions[unit.region] ??= []).push(unit.code);
+    if (unit.region) (regions[unit.region] ??= []).push(unit.code);
     const name = (times.get(unit.name) ?? 0) > 1 ? `${unit.name} (${unit.within})` : unit.name;
     return {
       type: "Feature",
