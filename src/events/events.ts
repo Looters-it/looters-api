@@ -41,6 +41,18 @@ export type GameEventInput =
       territoryId: string;
       data: { empireName: string; territoryName: string };
     }
+  | {
+      /** An empire on neither side sent resources to a siege: for whom, never how much. */
+      type: "SIEGE_SUPPORTED";
+      empireId: string;
+      territoryId: string;
+      data: {
+        empireName: string;
+        otherName: string;
+        territoryName: string;
+        side: "ATTACKER" | "DEFENDER";
+      };
+    }
   | { type: "MESSAGE"; empireId: string; data: { empireName: string; text: string } }
   | { type: "MATCH_OPENED" };
 

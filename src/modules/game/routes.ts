@@ -10,7 +10,13 @@ import {
   type StructureService,
 } from "./structures.js";
 import { chatBody, inviteBody, transferBody, type AllianceService } from "./alliances.js";
-import { attackBody, attackPreviewBody, respondBody, type BattleService } from "./battles.js";
+import {
+  attackBody,
+  attackPreviewBody,
+  respondBody,
+  supportBody,
+  type BattleService,
+} from "./battles.js";
 import {
   allocateBody,
   allocationRuleBody,
@@ -100,6 +106,12 @@ export function registerGameRoutes(
     const auth = await guard.user(request);
     const { id, battleId } = battleParams.parse(request.params);
     return battles.withdraw(id, battleId, auth);
+  });
+
+  app.post("/api/matches/:id/battles/:battleId/support", async (request) => {
+    const auth = await guard.user(request);
+    const { id, battleId } = battleParams.parse(request.params);
+    return battles.support(id, battleId, supportBody.parse(request.body), auth);
   });
 
   // ---------- Structures and merged areas ----------

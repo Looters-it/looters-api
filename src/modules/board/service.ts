@@ -15,7 +15,7 @@ export const BOARD_KINDS = {
   messages: ["MESSAGE"],
   empires: ["EMPIRE_CREATED", "EMPIRE_WITHDRAWN", "EMPIRE_FALLEN", "EMPIRE_ABANDONED"],
   annexations: ["ANNEXED"],
-  battles: ["BATTLE_RESOLVED", "BATTLE_ROUND"],
+  battles: ["BATTLE_RESOLVED", "BATTLE_ROUND", "SIEGE_SUPPORTED"],
   capitals: ["CAPITAL_BUILT", "CAPITAL_MOVED", "CAPITAL_PROMOTED"],
   areas: ["AREA_CREATED", "AREA_RENAMED"],
   // ALLIANCE_JOINED and ALLIANCE_LEFT are what matches played before pacts recorded.

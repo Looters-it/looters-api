@@ -695,6 +695,88 @@ describe.skipIf(!url)("battles", () => {
       ).toBeUndefined();
     });
 
+    it("takes resources from an empire that is on neither side, allied or not", async () => {
+      const battleId = await besieged();
+      const battle = await prisma.battle.findUniqueOrThrow({
+        where: { id: battleId },
+        include: { sources: true },
+      });
+      const sourceId = battle.sources[0]?.territoryId ?? "";
+      const own = async (user: string) => {
+        const seen = await state(user);
+        const mine = (seen as unknown as { me: { empireId: string } }).me.empireId;
+        const all = await prisma.territory.findMany({
+          where: { matchId, ownerEmpireId: mine, battleLock: null },
+          orderBy: { resources: "desc" },
+        });
+        return all[0]?.id ?? "";
+      };
+      const { currentTurn: turn } = await prisma.match.findUniqueOrThrow({
+        where: { id: matchId },
+      });
+      const support = (user: string, from: string, to: string, amount: number, id = battleId) =>
+        as(user, "POST", `/api/matches/${matchId}/battles/${id}/support`, {
+          fromTerritoryId: from,
+          toTerritoryId: to,
+          amount,
+          turn,
+        });
+      const held = async (id: string) =>
+        (await prisma.territory.findUniqueOrThrow({ where: { id } })).resources;
+
+      const carlas = await own("carla");
+      await prisma.territory.update({ where: { id: carlas }, data: { resources: 100 } });
+      const [targetBefore, sourceBefore] = [
+        await held(battle.targetTerritoryId),
+        await held(sourceId),
+      ];
+
+      // To who defends: onto the besieged territory.
+      expect((await support("carla", carlas, battle.targetTerritoryId, 30)).statusCode).toBe(200);
+      expect(await held(battle.targetTerritoryId)).toBe(targetBefore + 30);
+      // To who attacks: onto a territory the siege starts from.
+      expect((await support("carla", carlas, sourceId, 20)).statusCode).toBe(200);
+      expect(await held(sourceId)).toBe(sourceBefore + 20);
+      expect(await held(carlas)).toBe(50);
+      // It counts in the round awaited: the defender sees it in its strength.
+      expect(
+        (await state("bruno")).battles.find((candidate) => candidate.id === battleId),
+      ).toMatchObject({ defenseForce: targetBefore + 30 });
+
+      // Who helped whom is told to everyone, without the amount.
+      const events = await prisma.gameEvent.findMany({
+        where: { matchId, type: "SIEGE_SUPPORTED" },
+        orderBy: { createdAt: "asc" },
+      });
+      expect(events.map((event) => (event.data as { side: string }).side)).toEqual([
+        "DEFENDER",
+        "ATTACKER",
+      ]);
+      for (const event of events) {
+        expect(Object.values(event.data as object).some((value) => typeof value === "number")).toBe(
+          false,
+        );
+      }
+
+      expect(errorCode(await support("carla", carlas, battle.targetTerritoryId, 51))).toBe(
+        "NOT_ENOUGH_RESOURCES",
+      );
+      expect(errorCode(await support("carla", carlas, carlas, 1))).toBe("NOT_IN_THE_SIEGE");
+      expect(errorCode(await support("anna", await own("anna"), sourceId, 1))).toBe(
+        "NOT_A_THIRD_PARTY",
+      );
+      expect(errorCode(await support("bruno", await own("bruno"), sourceId, 1))).toBe(
+        "NOT_A_THIRD_PARTY",
+      );
+      expect(errorCode(await support("carla", battle.targetTerritoryId, sourceId, 1))).toBe(
+        "NOT_YOUR_TERRITORY",
+      );
+      expect((await support("carla", carlas, sourceId, 1, "nope")).statusCode).toBe(404);
+      // An attack in its first round is not a siege yet.
+      await prisma.battle.update({ where: { id: battleId }, data: { round: 1 } });
+      expect(errorCode(await support("carla", carlas, sourceId, 1))).toBe("NOT_A_SIEGE");
+    });
+
     it("tells everyone the round and by how much the last went, and each side what the next costs", async () => {
       const battleId = await besieged();
       const seenBy = async (user: string) =>

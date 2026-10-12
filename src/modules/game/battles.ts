@@ -8,6 +8,7 @@ import type { MatchService } from "../matches/service.js";
 import { areAllies } from "./alliances.js";
 import { acting, conflict, lockTerritories, reachersOf } from "./shared.js";
 import { moveTurnClose } from "../../queue/jobs.js";
+import { recordEvent } from "../../events/events.js";
 
 export const attackBody = z.strictObject({
   /** A municipality of the enemy territory to attack. */
@@ -21,6 +22,15 @@ export const attackPreviewBody = attackBody.omit({ turn: true });
 
 export const respondBody = z.strictObject({
   action: z.enum(["DEFEND", "SURRENDER"]),
+});
+
+export const supportBody = z.strictObject({
+  /** An own territory, not in a battle. */
+  fromTerritoryId: z.string().min(1),
+  /** The besieged territory, to help who defends it; one the siege starts from, to help who attacks. */
+  toTerritoryId: z.string().min(1),
+  amount: z.number().int().min(1),
+  turn: z.number().int().min(1),
 });
 
 /** Asks `jobs` to resolve a battle: battles are resolved only there. */
@@ -350,6 +360,76 @@ export class BattleService {
     } catch (error) {
       this.onQueueError(error, battleId);
     }
+    this.onChange(matchId, "battles");
+    return this.matches.state(matchId, viewer);
+  }
+
+  /**
+   * An empire that is on neither side sends resources to a siege, allied or not: onto
+   * the besieged territory for who defends it, onto a territory the siege starts from
+   * for who attacks. What arrives belongs to who holds that territory, and counts in
+   * the round awaited like anything else on it. Who helped whom is public; how much is not.
+   */
+  async support(
+    matchId: string,
+    battleId: string,
+    body: z.infer<typeof supportBody>,
+    viewer: AuthContext,
+  ) {
+    await this.prisma.$transaction(async (tx) => {
+      const { match, empire } = await acting(tx, matchId, viewer, body.turn);
+      const locked = await lockTerritories(tx, matchId, [body.fromTerritoryId, body.toTerritoryId]);
+      const from = locked.find((territory) => territory.id === body.fromTerritoryId);
+      const to = locked.find((territory) => territory.id === body.toTerritoryId);
+      // Read with the territories locked: a round being fought has them locked too.
+      const battle = await tx.battle.findFirst({ where: { id: battleId, matchId } });
+      if (!battle) throw notFound("Battle");
+      if (battle.status !== "OPEN" || battle.round === 1) {
+        throw conflict("NOT_A_SIEGE", "Only a siege can be supported");
+      }
+      if (empire.id === battle.attackerEmpireId || empire.id === battle.defenderEmpireId) {
+        throw conflict("NOT_A_THIRD_PARTY", "The two sides of a siege cannot support it");
+      }
+      if (from?.ownerEmpireId !== empire.id) {
+        throw conflict("NOT_YOUR_TERRITORY", "You can send resources only from your own territory");
+      }
+      if (from.inBattle) {
+        throw conflict("TERRITORY_IN_BATTLE", "A territory in a battle cannot give");
+      }
+      const lock = to ? await tx.battleLock.findUnique({ where: { territoryId: to.id } }) : null;
+      if (!to || lock?.battleId !== battle.id) {
+        throw conflict("NOT_IN_THE_SIEGE", "Choose a territory of this siege");
+      }
+      if (from.resources < body.amount) {
+        throw conflict("NOT_ENOUGH_RESOURCES", "The territory does not hold that much");
+      }
+      await tx.territory.update({
+        where: { id: from.id },
+        data: { resources: { decrement: body.amount } },
+      });
+      await tx.territory.update({
+        where: { id: to.id },
+        data: { resources: { increment: body.amount } },
+      });
+      const defending = to.id === battle.targetTerritoryId;
+      const [target, helped] = await Promise.all([
+        tx.territory.findUniqueOrThrow({ where: { id: battle.targetTerritoryId } }),
+        tx.empire.findUniqueOrThrow({
+          where: { id: defending ? battle.defenderEmpireId : battle.attackerEmpireId },
+        }),
+      ]);
+      await recordEvent(tx, matchId, match.currentTurn, {
+        type: "SIEGE_SUPPORTED",
+        empireId: empire.id,
+        territoryId: target.id,
+        data: {
+          empireName: empire.name,
+          otherName: helped.name,
+          territoryName: target.name,
+          side: defending ? "DEFENDER" : "ATTACKER",
+        },
+      });
+    });
     this.onChange(matchId, "battles");
     return this.matches.state(matchId, viewer);
   }
