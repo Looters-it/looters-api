@@ -5,6 +5,8 @@ import { recordEvent } from "../../events/events.js";
 import { AppError, notFound } from "../../http/errors.js";
 import { turnIncome } from "../../rules/income.js";
 import {
+  levelOf,
+  reachOf,
   structureBlock,
   structureCatalogue,
   structureDefinition,
@@ -24,6 +26,7 @@ export const buildBody = z.strictObject({
   turn,
 });
 export const moveStructureBody = z.strictObject({ territoryId: z.string().min(1), turn });
+export const upgradeBody = z.strictObject({ turn });
 
 const mergeShape = {
   /** Own territories to merge into one area: contiguous, two or more. */
@@ -105,6 +108,8 @@ export class StructureService {
         durationTurns: definition.durationTurns(rules),
         cooldownTurns: definition.cooldownTurns?.(rules) ?? 0,
         effects: definition.effects,
+        /** How far it reaches at each level, for one that reaches far; null otherwise. */
+        rangesKm: definition.rangesKm?.(rules) ?? null,
         sites: territories.map((territory) => ({
           territoryId: territory.id,
           name: territory.name,
@@ -187,7 +192,7 @@ export class StructureService {
           cooldownUntilTurn:
             expiresTurn === null ? null : expiresTurn + (definition.cooldownTurns?.(rules) ?? 0),
           // What `jobs` and the battle rules read: effects, never the type.
-          data: { effects: definition.effects },
+          data: { effects: definition.effects, ...reachOf(definition, rules, 1) },
         },
       });
       if (definition.effects.includes("BACKUP_CAPITAL")) {
@@ -241,6 +246,59 @@ export class StructureService {
         data: {
           territoryId: destination.id,
           data: { ...(structure.data as object), lastMoveTurn: match.currentTurn },
+        },
+      });
+    });
+    this.onChange(matchId, "structures");
+    return this.matches.state(matchId, viewer);
+  }
+
+  /**
+   * Takes a structure that reaches far to its next level: a wider range, paid by the
+   * territory it stands on.
+   */
+  async upgrade(
+    matchId: string,
+    structureId: string,
+    body: z.infer<typeof upgradeBody>,
+    viewer: AuthContext,
+  ) {
+    await this.prisma.$transaction(async (tx) => {
+      const { empire, rules } = await acting(tx, matchId, viewer, body.turn, "PRELIMINARY");
+      const found = await tx.structure.findFirst({
+        where: { id: structureId, matchId, empireId: empire.id, active: true },
+      });
+      if (!found) throw notFound("Structure");
+      const territory = (await lockTerritories(tx, matchId, [found.territoryId]))[0];
+      // Read again with its territory locked: two upgrades at once are one after the other.
+      const structure = await tx.structure.findUniqueOrThrow({ where: { id: found.id } });
+      const definition = structureDefinition(structure.type);
+      const ranges = definition?.rangesKm?.(rules);
+      if (!definition || !ranges) {
+        throw conflict("STRUCTURE_NOT_UPGRADABLE", "This structure cannot be upgraded");
+      }
+      const level = levelOf(structure.data);
+      if (level >= ranges.length) {
+        throw conflict("STRUCTURE_MAX_LEVEL", "This structure is at its highest level");
+      }
+      if (territory?.ownerEmpireId !== empire.id) {
+        throw conflict("NOT_YOUR_TERRITORY", "You can upgrade only on your own territories");
+      }
+      if (territory.inBattle) {
+        throw conflict("TERRITORY_IN_BATTLE", "Nothing is upgraded during a battle on it");
+      }
+      const cost = definition.upgradeCost?.(rules, level) ?? 0;
+      if (territory.resources < cost) {
+        throw conflict("STRUCTURE_NOT_ENOUGH_RESOURCES", "The territory does not hold that much");
+      }
+      await tx.territory.update({
+        where: { id: territory.id },
+        data: { resources: { decrement: cost } },
+      });
+      await tx.structure.update({
+        where: { id: structure.id },
+        data: {
+          data: { ...(structure.data as object), ...reachOf(definition, rules, level + 1) },
         },
       });
     });

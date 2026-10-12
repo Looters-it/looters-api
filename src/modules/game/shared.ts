@@ -41,10 +41,13 @@ export function neighboursOf(db: Tx | PrismaClient, matchId: string, territoryId
 
 /**
  * Every way from a municipality to another, as rows of `x` (from) and `y` (to): the
- * borders, both ways, and the sea, from the municipalities of a territory with a port
- * to every municipality of the match that is on the sea and within the range of the
- * port (`portRangeKm` of the match, between the centres of the two municipalities;
- * zero is no limit). Where a query asks what an empire can reach, this is what it joins.
+ * borders, both ways; the sea, from the municipalities of a territory with a port to
+ * every municipality of the match that is on the sea; and the air, from those of a
+ * territory with an airport to any municipality of the match. Port and airport reach
+ * only within their range: the `rangeKm` stored on the structure (that of its level;
+ * one found on annexing has the first range of the match), between the centres of the
+ * two municipalities; zero is no limit. Where a query asks what an empire can reach,
+ * this is what it joins.
  */
 export const reachEdges = (matchId: string) => Prisma.sql`
   SELECT "aId" AS x, "bId" AS y FROM "GeoAdjacency"
@@ -55,17 +58,20 @@ export const reachEdges = (matchId: string) => Prisma.sql`
   JOIN "TerritoryUnit" harbour ON harbour."territoryId" = port."territoryId"
   JOIN "TerritoryUnit" shore ON shore."matchId" = port."matchId"
     AND shore."territoryId" <> port."territoryId"
-  JOIN "GeoUnit" sea ON sea.id = shore."geoUnitId" AND sea.coastal
+  JOIN "GeoUnit" far ON far.id = shore."geoUnitId"
   JOIN "GeoUnit" quay ON quay.id = harbour."geoUnitId"
   JOIN "Match" played ON played.id = port."matchId"
   CROSS JOIN LATERAL (
-    SELECT coalesce((played.config->>'portRangeKm')::float8, ${DEFAULT_MATCH_RULES.portRangeKm}) AS km
+    SELECT jsonb_exists(port.data->'effects', 'AIR_REACH') AS air,
+      jsonb_exists(port.data->'effects', 'SEA_REACH') AS sea,
+      coalesce((port.data->>'rangeKm')::float8, (played.config->>'portRangeKm')::float8,
+        ${DEFAULT_MATCH_RULES.portRangeKm}) AS km
   ) reach
   WHERE port."matchId" = ${matchId} AND port.active
-    AND jsonb_exists(port.data->'effects', 'SEA_REACH')
+    AND (reach.air OR (reach.sea AND far.coastal))
     AND (reach.km = 0 OR ST_DistanceSphere(
       ST_MakePoint(quay."centroidLon", quay."centroidLat"),
-      ST_MakePoint(sea."centroidLon", sea."centroidLat")) <= reach.km * 1000)`;
+      ST_MakePoint(far."centroidLon", far."centroidLat")) <= reach.km * 1000)`;
 
 /** A territory that another can be reached from, or that it reaches. */
 export interface Reached {

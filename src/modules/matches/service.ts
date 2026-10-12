@@ -9,7 +9,7 @@ import { drawHiddenResources, secureRandom, type Random } from "../../rules/hidd
 import { costOf } from "../../rules/attack.js";
 import { turnIncome } from "../../rules/income.js";
 import { preliminaryEndsAt } from "../../rules/phases.js";
-import { structureDefinition } from "../../rules/structures.js";
+import { levelOf, structureDefinition } from "../../rules/structures.js";
 import type { z } from "zod";
 import {
   PLANNED_EDITABLE,
@@ -131,6 +131,24 @@ class Gate {
 
 /** How many matches are written to the database at the same time. */
 const CREATING_AT_ONCE = 2;
+
+/** The reach of a stored structure, as the state tells it. */
+function reachState(type: string, data: unknown, rules: MatchRules) {
+  const definition = structureDefinition(type);
+  const ranges = definition?.rangesKm?.(rules);
+  if (!definition || !ranges) return { level: null, rangeKm: null, upgrade: null };
+  const level = levelOf(data);
+  const next = ranges[level];
+  return {
+    level,
+    maxLevel: ranges.length,
+    rangeKm: (data as { rangeKm?: number }).rangeKm ?? ranges[level - 1] ?? 0,
+    upgrade:
+      next === undefined
+        ? null
+        : { cost: definition.upgradeCost?.(rules, level) ?? 0, rangeKm: next },
+  };
+}
 
 export class MatchService {
   private readonly creating = new Gate(CREATING_AT_ONCE);
@@ -1191,6 +1209,9 @@ export class MatchService {
         territoryId: structure.territoryId,
         empireId: structure.empireId,
         effects: (structure.data as { effects?: string[] }).effects ?? [],
+        // A structure that reaches far: its level, how far it reaches now, and what the
+        // next level costs and gives. Null where there is nothing of the kind.
+        ...reachState(structure.type, structure.data, rules),
         /** Turns it still lasts, counting the current one; null if permanent. */
         turnsLeft:
           structure.expiresTurn === null

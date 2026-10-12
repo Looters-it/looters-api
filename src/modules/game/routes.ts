@@ -7,6 +7,7 @@ import {
   mergePreviewBody,
   moveStructureBody,
   renameBody,
+  upgradeBody,
   type StructureService,
 } from "./structures.js";
 import { chatBody, inviteBody, transferBody, type AllianceService } from "./alliances.js";
@@ -129,6 +130,11 @@ export function registerGameRoutes(
     const auth = await guard.user(request);
     const { id, structureId } = structureParams.parse(request.params);
     return structures.move(id, structureId, moveStructureBody.parse(request.body), auth);
+  });
+  app.post("/api/matches/:id/structures/:structureId/upgrade", async (request) => {
+    const auth = await guard.user(request);
+    const { id, structureId } = structureParams.parse(request.params);
+    return structures.upgrade(id, structureId, upgradeBody.parse(request.body), auth);
   });
 
   app.get("/api/matches/:id/areas", async (request) =>

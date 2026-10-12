@@ -70,9 +70,19 @@ const matchRulesBase = z.strictObject({
   portCost: count.default(100),
   portFoundIslandPct: pct.default(50),
   portFoundCoastPct: pct.default(20),
-  // How far a port reaches, in kilometres between the centres of two municipalities.
-  // Zero: as far as the sea goes.
+  // How far a port reaches, in kilometres between the centres of two municipalities,
+  // as built and after each of its two upgrades. Zero: as far as the sea goes.
   portRangeKm: count.default(200),
+  portRange2Km: count.default(500),
+  portRange3Km: count.default(700),
+  /** What each upgrade of a port costs. */
+  portUpgradeCost: count.default(100),
+  // The airport: built anywhere, it reaches by air whatever is in its range, sea or not.
+  airportCost: count.default(300),
+  airportRangeKm: count.default(1000),
+  airportRange2Km: count.default(1500),
+  airportRange3Km: count.default(2000),
+  airportUpgradeCost: count.default(300),
 
   // Alliances (§2.6, §9 #9)
   // Alliances are pacts between two empires: this is how many an empire may hold at once.

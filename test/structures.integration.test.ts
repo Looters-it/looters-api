@@ -31,6 +31,12 @@ describe("structure catalogue", () => {
       "BLOCK",
       "SECOND_CAPITAL",
       "PORT",
+      "AIRPORT",
+    ]);
+    // Port and airport reach further at each of their three levels.
+    expect(structureDefinition("PORT")?.rangesKm?.(DEFAULT_MATCH_RULES)).toEqual([200, 500, 700]);
+    expect(structureDefinition("AIRPORT")?.rangesKm?.(DEFAULT_MATCH_RULES)).toEqual([
+      1000, 1500, 2000,
     ]);
     const block = structureDefinition("BLOCK");
     const second = structureDefinition("SECOND_CAPITAL");
@@ -225,6 +231,61 @@ describe.skipIf(!url)("structures and merged areas", () => {
   const errorCode = (response: { json: () => unknown }) =>
     (response.json() as { error?: { code: string } }).error?.code;
 
+  describe("airport", () => {
+    it("is built away from the sea, for 300, and reaches what is in its range, sea or not", async () => {
+      // Nothing here is on the sea. Bruno's 5 touches nothing of Anna's.
+      const built = await build("anna", "AIRPORT", 1);
+      expect(built.statusCode, built.body).toBe(201);
+      const after = built.json<State>();
+      const airport = after.structures.find((structure) => structure.type === "AIRPORT");
+      expect(airport).toMatchObject({
+        territoryId: await idOf(1),
+        turnsLeft: null,
+        level: 1,
+        rangeKm: 1000,
+        upgrade: { cost: 300, rangeKm: 1500 },
+      });
+      expect(airport?.effects).toEqual(["AIR_REACH"]);
+      expect(after.territories.find((t) => t.geoUnitIds.includes(unit[1] ?? 0))?.resources).toBe(
+        1700,
+      );
+
+      await setPhase(prisma, matchId, "ACTION");
+      const targets = (await as("anna", "GET", `/api/matches/${matchId}/targets`)).json<{
+        territoryIds: string[];
+      }>();
+      expect(targets.territoryIds).toContain(await idOf(5));
+      // From the airport, not from a territory that has none.
+      const elsewhere = await as("anna", "POST", `/api/matches/${matchId}/attacks`, {
+        targetGeoUnitId: unit[5],
+        fromTerritoryIds: [await idOf(0)],
+        turn: 10,
+      });
+      expect(elsewhere.json<{ error: { code: string } }>().error.code).toBe("NOT_ADJACENT");
+      const attack = await as("anna", "POST", `/api/matches/${matchId}/attacks`, {
+        targetGeoUnitId: unit[5],
+        fromTerritoryIds: [await idOf(1)],
+        turn: 10,
+      });
+      expect(attack.statusCode, attack.body).toBe(201);
+    });
+
+    it("reaches only as far as its range", async () => {
+      const match = await prisma.match.findUniqueOrThrow({ where: { id: matchId } });
+      // 1 and 5 are some 31 km apart.
+      await prisma.match.update({
+        where: { id: matchId },
+        data: { config: { ...(match.config as object), airportRangeKm: 25 } },
+      });
+      expect((await build("anna", "AIRPORT", 1)).statusCode).toBe(201);
+      await setPhase(prisma, matchId, "ACTION");
+      const targets = (await as("anna", "GET", `/api/matches/${matchId}/targets`)).json<{
+        territoryIds: string[];
+      }>();
+      expect(targets.territoryIds).not.toContain(await idOf(5));
+    });
+  });
+
   describe("port", () => {
     const onSea = (...indexes: number[]) =>
       prisma.geoUnit.updateMany({
@@ -284,11 +345,10 @@ describe.skipIf(!url)("structures and merged areas", () => {
       await onSea(0, 5);
       // The centres of 0 and 5 are some 39 km apart.
       const match = await prisma.match.findUniqueOrThrow({ where: { id: matchId } });
-      const range = (portRangeKm: number) =>
-        prisma.match.update({
-          where: { id: matchId },
-          data: { config: { ...(match.config as object), portRangeKm } },
-        });
+      await prisma.match.update({
+        where: { id: matchId },
+        data: { config: { ...(match.config as object), portRangeKm: 35 } },
+      });
       expect((await build("anna", "PORT", 0)).statusCode).toBe(201);
       await setPhase(prisma, matchId, "ACTION");
       const reached = async () =>
@@ -296,7 +356,6 @@ describe.skipIf(!url)("structures and merged areas", () => {
           territoryIds: string[];
         }>().territoryIds;
 
-      await range(35);
       expect(await reached()).not.toContain(await idOf(5));
       const far = await as("anna", "POST", `/api/matches/${matchId}/attacks`, {
         targetGeoUnitId: unit[5],
@@ -305,11 +364,109 @@ describe.skipIf(!url)("structures and merged areas", () => {
       });
       expect(far.json<{ error: { code: string } }>().error.code).toBe("NOT_ADJACENT");
 
-      await range(45);
+      // The range is the one stored on the port; zero is no limit at all.
+      const port = await prisma.structure.findFirstOrThrow({ where: { matchId, type: "PORT" } });
+      await prisma.structure.update({
+        where: { id: port.id },
+        data: { data: { ...(port.data as object), rangeKm: 0 } },
+      });
       expect(await reached()).toContain(await idOf(5));
-      // Zero is no limit at all.
-      await range(0);
+      // A port found on annexing stores none: it has the first range of the match.
+      await prisma.structure.update({
+        where: { id: port.id },
+        data: { data: { effects: ["SEA_REACH"], found: true } },
+      });
+      expect(await reached()).not.toContain(await idOf(5));
+    });
+
+    it("is upgraded twice, each time to a wider range", async () => {
+      await onSea(0, 5);
+      const match = await prisma.match.findUniqueOrThrow({ where: { id: matchId } });
+      // 0 and 5 are some 39 km apart: out of reach as built, in reach at the second level.
+      await prisma.match.update({
+        where: { id: matchId },
+        data: {
+          config: {
+            ...(match.config as object),
+            portRangeKm: 35,
+            portRange2Km: 45,
+            portRange3Km: 90,
+          },
+        },
+      });
+      const built = (await build("anna", "PORT", 0)).json<State>();
+      const port = built.structures.find((structure) => structure.type === "PORT");
+      expect(port).toMatchObject({
+        level: 1,
+        maxLevel: 3,
+        rangeKm: 35,
+        upgrade: { cost: 100, rangeKm: 45 },
+      });
+      const upgrade = (user: string) =>
+        as(user, "POST", `/api/matches/${matchId}/structures/${port?.id ?? ""}/upgrade`, {
+          turn: 10,
+        });
+      const reached = async () => {
+        await setPhase(prisma, matchId, "ACTION");
+        const ids = (await as("anna", "GET", `/api/matches/${matchId}/targets`)).json<{
+          territoryIds: string[];
+        }>().territoryIds;
+        await setPhase(prisma, matchId, "PRELIMINARY");
+        return ids;
+      };
+      expect(await reached()).not.toContain(await idOf(5));
+      expect((await upgrade("bruno")).statusCode).toBe(404);
+
+      const second = await upgrade("anna");
+      expect(second.statusCode, second.body).toBe(200);
+      const after = second.json<State>();
+      expect(after.structures.find((structure) => structure.id === port?.id)).toMatchObject({
+        level: 2,
+        rangeKm: 45,
+        upgrade: { cost: 100, rangeKm: 90 },
+      });
+      // 2000, less the port and its upgrade.
+      expect(after.territories.find((t) => t.geoUnitIds.includes(unit[0] ?? 0))?.resources).toBe(
+        1800,
+      );
       expect(await reached()).toContain(await idOf(5));
+
+      expect(
+        (await upgrade("anna")).json<State>().structures.find((s) => s.id === port?.id),
+      ).toMatchObject({ level: 3, rangeKm: 90, upgrade: null });
+      expect((await upgrade("anna")).json<{ error: { code: string } }>().error.code).toBe(
+        "STRUCTURE_MAX_LEVEL",
+      );
+    });
+
+    it("cannot be upgraded without what it costs, and a block cannot be upgraded at all", async () => {
+      await onSea(0);
+      const port = (await build("anna", "PORT", 0))
+        .json<State>()
+        .structures.find((structure) => structure.type === "PORT");
+      await prisma.territory.update({ where: { id: await idOf(0) }, data: { resources: 99 } });
+      const poor = await as(
+        "anna",
+        "POST",
+        `/api/matches/${matchId}/structures/${port?.id ?? ""}/upgrade`,
+        { turn: 10 },
+      );
+      expect(poor.json<{ error: { code: string } }>().error.code).toBe(
+        "STRUCTURE_NOT_ENOUGH_RESOURCES",
+      );
+      const block = (await build("anna", "BLOCK", 1))
+        .json<State>()
+        .structures.find((structure) => structure.type === "BLOCK");
+      expect(block).toMatchObject({ level: null, rangeKm: null, upgrade: null });
+      const refused = await as(
+        "anna",
+        "POST",
+        `/api/matches/${matchId}/structures/${block?.id ?? ""}/upgrade`,
+        { turn: 10 },
+      );
+      expect(refused.json<{ error: { code: string } }>().error.code).toBe(
+        "STRUCTURE_NOT_UPGRADABLE",
+      );
     });
 
     it("annexes across the sea, and may find a port already there", async () => {

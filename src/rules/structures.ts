@@ -17,7 +17,12 @@ export type StructureEffect =
    * From this territory the empire reaches every territory on the sea, bordering or
    * not: to attack it or to annex it. It stays with the territory when it is conquered.
    */
-  | "SEA_REACH";
+  | "SEA_REACH"
+  /**
+   * From this territory the empire reaches every territory in its range, on the sea or
+   * not. Like a port, it stays with the territory when it is conquered.
+   */
+  | "AIR_REACH";
 
 /** Why a structure cannot be built on a territory. Codes are translated by the web interface. */
 export type StructureBlock =
@@ -66,8 +71,25 @@ export interface StructureDefinition {
   onCoastOnly?: boolean;
   /** Turns between two moves to another own territory, if it can be moved at all. */
   moveEveryTurns?(rules: MatchRules): number;
+  /**
+   * For a structure that reaches far: its range in kilometres at each level, the first
+   * being the one it is built with. Each further one is an upgrade. Zero is no limit.
+   */
+  rangesKm?(rules: MatchRules): number[];
+  /** What it costs to take it from this level to the next. */
+  upgradeCost?(rules: MatchRules, level: number): number;
   effects: StructureEffect[];
 }
+
+/** What a structure stores about its reach when it is built or upgraded to a level. */
+export function reachOf(definition: StructureDefinition, rules: MatchRules, level: number) {
+  const ranges = definition.rangesKm?.(rules);
+  if (!ranges) return {};
+  return { level, rangeKm: ranges[Math.min(level, ranges.length) - 1] ?? 0 };
+}
+
+/** The level a stored structure is at: the first, unless it was upgraded. */
+export const levelOf = (data: unknown): number => (data as { level?: number }).level ?? 1;
 
 /** The value of N turns of income, rounded up (PROMPT §2.10, §9 #18). */
 export const turnsToResources = (turns: number, turnValue: number) => Math.ceil(turns * turnValue);
@@ -136,5 +158,20 @@ registerStructure({
   cost: (rules) => rules.portCost,
   durationTurns: () => null,
   onCoastOnly: true,
+  rangesKm: (rules) => [rules.portRangeKm, rules.portRange2Km, rules.portRange3Km],
+  upgradeCost: (rules) => rules.portUpgradeCost,
   effects: ["SEA_REACH"],
+});
+
+/**
+ * Airport: built on any territory, by the sea or not, it reaches every territory in its
+ * range, which two upgrades make wider.
+ */
+registerStructure({
+  type: "AIRPORT",
+  cost: (rules) => rules.airportCost,
+  durationTurns: () => null,
+  rangesKm: (rules) => [rules.airportRangeKm, rules.airportRange2Km, rules.airportRange3Km],
+  upgradeCost: (rules) => rules.airportUpgradeCost,
+  effects: ["AIR_REACH"],
 });
