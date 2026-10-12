@@ -13,7 +13,7 @@ import {
 } from "../../rules/structures.js";
 import type { MatchService } from "../matches/service.js";
 import { rulesOf } from "../matches/service.js";
-import { acting, conflict, lockTerritories, neighboursOf, type Tx } from "./shared.js";
+import { acting, conflict, lockTerritories, neighboursOf, onSea, type Tx } from "./shared.js";
 
 const turn = z.number().int().min(1);
 
@@ -37,6 +37,15 @@ export const mergePreviewBody = z.strictObject({
 export const renameBody = z.strictObject({ name: mergeShape.name });
 
 /** Municipalities an empire controls: what its income is counted on. */
+/** Which of the given territories have access to the sea. */
+async function territoriesOnSea(db: Tx | PrismaClient, ids: string[]): Promise<Set<string>> {
+  const rows = await db.$queryRaw<{ id: string }[]>`
+    SELECT DISTINCT tu."territoryId" AS id
+    FROM "TerritoryUnit" tu JOIN "GeoUnit" u ON u.id = tu."geoUnitId"
+    WHERE tu."territoryId" = ANY(${ids}) AND u.coastal`;
+  return new Set(rows.map((row) => row.id));
+}
+
 async function unitsOfEmpire(tx: Tx | PrismaClient, empireId: string): Promise<number> {
   return tx.territoryUnit.count({ where: { territory: { ownerEmpireId: empireId } } });
 }
@@ -82,6 +91,11 @@ export class StructureService {
       this.prisma.structure.findMany({ where: { matchId, empireId: empire.id } }),
     ]);
 
+    const coastal = await territoriesOnSea(
+      this.prisma,
+      territories.map((territory) => territory.id),
+    );
+
     return structureCatalogue().map((definition) => {
       const cost = definition.cost(rules, turnValue);
       const mine = structures.filter((s) => s.type === definition.type);
@@ -110,6 +124,7 @@ export class StructureService {
                   .map((s) => s.cooldownUntilTurn ?? -1),
               ),
               currentTurn: match.currentTurn,
+              coastal: coastal.has(territory.id),
             },
             cost,
           ),
@@ -148,6 +163,7 @@ export class StructureService {
               .map((s) => s.cooldownUntilTurn ?? -1),
           ),
           currentTurn: match.currentTurn,
+          coastal: await onSea(tx, territory.id),
         },
         cost,
       );

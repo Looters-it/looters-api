@@ -182,6 +182,14 @@ model GeoUpload {
   @@index([areaId])
 }
 
+// The coastline of the world in short pieces (Natural Earth): loaded once by a script.
+model GeoCoast {
+  id   Int                                     @id @default(autoincrement())
+  geom Unsupported("geometry(LineString,4326)")
+
+  @@index([geom], type: Gist)
+}
+
 enum GeoIsolation {
   ISLAND
   EXCLAVE
@@ -203,6 +211,8 @@ model GeoUnit {
   geomSimple  Unsupported("geometry(MultiPolygon,4326)")
   // Why it has no border with the rest of its country, when it has none.
   isolation   GeoIsolation?
+  // Whether it has access to the sea: an island, or land the coast runs along.
+  coastal     Boolean                                    @default(false)
   territories TerritoryUnit[]
   adjacentA   GeoAdjacency[]                             @relation("adjA")
   adjacentB   GeoAdjacency[]                             @relation("adjB")

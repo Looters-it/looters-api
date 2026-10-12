@@ -2,6 +2,8 @@ import type { PrismaClient } from "@prisma/client";
 
 /** How close another country must lie to count as touching, in degrees (about 200 m). */
 const TOUCH = 0.002;
+/** How far from the coastline a municipality still counts as on the sea, in degrees (about 2 km). */
+const COAST_REACH = 0.02;
 /** An exclave has at least this share of its border on another country. */
 const EXCLAVE_SHARE = 0.25;
 
@@ -17,7 +19,7 @@ const EXCLAVE_SHARE = 0.25;
  * municipalities are added. It takes the best part of a minute with a hundred thousand.
  */
 export async function classifyIsolated(prisma: PrismaClient): Promise<number> {
-  return prisma.$executeRaw`
+  const changed = await prisma.$executeRaw`
     WITH RECURSIVE up AS (
       SELECT id AS leaf, id, "parentId" FROM "GeoArea"
       UNION ALL
@@ -49,6 +51,20 @@ export async function classifyIsolated(prisma: PrismaClient): Promise<number> {
     UPDATE "GeoUnit" u SET isolation = kind.isolation
     FROM "GeoUnit" all_units LEFT JOIN kind ON kind.id = all_units.id
     WHERE u.id = all_units.id AND u.isolation IS DISTINCT FROM kind.isolation`;
+  // On the sea: every island, and the land the coast runs along or close by (the
+  // coastline is rougher than the borders, hence the reach). Without a coastline
+  // loaded (`pnpm areas:coast`) only the islands are.
+  const onSea = await prisma.$executeRaw`
+    UPDATE "GeoUnit" u SET coastal = shore.coastal
+    FROM (
+      SELECT unit.id, (unit.isolation = 'ISLAND' OR EXISTS (
+        SELECT 1 FROM "GeoCoast" coast
+        WHERE coast.geom && ST_Expand(unit.geom, ${COAST_REACH}::float8)
+          AND ST_DWithin(coast.geom, unit.geom, ${COAST_REACH}::float8))) IS TRUE AS coastal
+      FROM "GeoUnit" unit
+    ) shore
+    WHERE u.id = shore.id AND u.coastal <> shore.coastal`;
+  return changed + onSea;
 }
 
 let running: Promise<void> | null = null;

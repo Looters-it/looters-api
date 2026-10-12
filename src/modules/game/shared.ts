@@ -1,4 +1,4 @@
-import type { Empire, Match, Prisma, PrismaClient } from "@prisma/client";
+import { Prisma, type Empire, type Match, type PrismaClient } from "@prisma/client";
 import type { AuthContext } from "../../auth/sessions.js";
 import { AppError, notFound } from "../../http/errors.js";
 import { rulesOf } from "../matches/service.js";
@@ -36,6 +36,93 @@ export function neighboursOf(db: Tx | PrismaClient, matchId: string, territoryId
     JOIN "GeoUnit" u ON u.id = adjacent.id
     WHERE t.id <> ${territoryId}
     ORDER BY u.name`;
+}
+
+/**
+ * Every way from a municipality to another, as rows of `x` (from) and `y` (to): the
+ * borders, both ways, and the sea, from the municipalities of a territory with a port
+ * to every municipality of the match that is on the sea. Where a query asks what an
+ * empire can reach, this is what it joins.
+ */
+export const reachEdges = (matchId: string) => Prisma.sql`
+  SELECT "aId" AS x, "bId" AS y FROM "GeoAdjacency"
+  UNION ALL SELECT "bId", "aId" FROM "GeoAdjacency"
+  UNION ALL
+  SELECT harbour."geoUnitId", shore."geoUnitId"
+  FROM "Structure" port
+  JOIN "TerritoryUnit" harbour ON harbour."territoryId" = port."territoryId"
+  JOIN "TerritoryUnit" shore ON shore."matchId" = port."matchId"
+    AND shore."territoryId" <> port."territoryId"
+  JOIN "GeoUnit" sea ON sea.id = shore."geoUnitId" AND sea.coastal
+  WHERE port."matchId" = ${matchId} AND port.active
+    AND jsonb_exists(port.data->'effects', 'SEA_REACH')`;
+
+/** A territory that another can be reached from, or that it reaches. */
+export interface Reached {
+  territoryId: string;
+  ownerEmpireId: string | null;
+}
+
+/**
+ * The territories that can reach this one: those that border it and, when it is on
+ * the sea, those with a port, wherever they are. It is from these that it can be
+ * attacked, and paid for when it is annexed.
+ */
+export function reachersOf(db: Tx | PrismaClient, matchId: string, territoryId: string) {
+  return db.$queryRaw<Reached[]>`
+    WITH edges AS (${reachEdges(matchId)})
+    SELECT DISTINCT t.id AS "territoryId", t."ownerEmpireId"
+    FROM "TerritoryUnit" here
+    JOIN edges ON edges.y = here."geoUnitId"
+    JOIN "TerritoryUnit" there ON there."matchId" = ${matchId} AND there."geoUnitId" = edges.x
+    JOIN "Territory" t ON t.id = there."territoryId"
+    WHERE here."territoryId" = ${territoryId} AND t.id <> ${territoryId}`;
+}
+
+/** Whether any municipality of a territory is on the sea. */
+export async function onSea(db: Tx | PrismaClient, territoryId: string): Promise<boolean> {
+  const rows = await db.$queryRaw<{ coastal: boolean }[]>`
+    SELECT bool_or(u.coastal) AS coastal
+    FROM "TerritoryUnit" tu JOIN "GeoUnit" u ON u.id = tu."geoUnitId"
+    WHERE tu."territoryId" = ${territoryId}`;
+  return rows[0]?.coastal === true;
+}
+
+/** Whether a territory is an island: any of its municipalities is one. */
+export async function isIsland(db: Tx | PrismaClient, territoryId: string): Promise<boolean> {
+  const rows = await db.$queryRaw<{ island: boolean | null }[]>`
+    SELECT bool_or(u.isolation = 'ISLAND') AS island
+    FROM "TerritoryUnit" tu JOIN "GeoUnit" u ON u.id = tu."geoUnitId"
+    WHERE tu."territoryId" = ${territoryId}`;
+  return rows[0]?.island === true;
+}
+
+/**
+ * Puts a port on a territory for nothing: the one an island has when an empire starts
+ * from it, or the one found there when it is annexed. Nothing when it has one already.
+ */
+export async function grantPort(
+  tx: Tx,
+  matchId: string,
+  empireId: string,
+  territoryId: string,
+  turn: number,
+): Promise<boolean> {
+  const there = await tx.structure.findFirst({
+    where: { territoryId, type: "PORT", active: true },
+  });
+  if (there) return false;
+  await tx.structure.create({
+    data: {
+      matchId,
+      territoryId,
+      empireId,
+      type: "PORT",
+      builtTurn: turn,
+      data: { effects: ["SEA_REACH"], found: true },
+    },
+  });
+  return true;
 }
 
 /**

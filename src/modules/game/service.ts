@@ -5,6 +5,7 @@ import type { AuthContext } from "../../auth/sessions.js";
 import { recordEvent } from "../../events/events.js";
 import { AppError, notFound } from "../../http/errors.js";
 import type { MatchRules } from "../../rules/config.js";
+import { secureRandom, type Random } from "../../rules/hidden-resources.js";
 import type { MatchService } from "../matches/service.js";
 import { areAllies } from "./alliances.js";
 import {
@@ -13,7 +14,12 @@ import {
   capitalsOf,
   conflict,
   lockTerritories,
+  grantPort,
+  isIsland,
   neighboursOf,
+  onSea,
+  reachEdges,
+  reachersOf,
   placesOf,
 } from "./shared.js";
 
@@ -60,6 +66,9 @@ const FRONT_REACH_DEGREES = 0.0006;
 export class GameService {
   /** Called after a change that the followers of a match should see. */
   onChange: (matchId: string, kind: string) => void = () => undefined;
+
+  /** Where chance comes from (a port found on annexing): replaced in the tests. */
+  random: Random = secureRandom;
 
   constructor(
     private readonly prisma: PrismaClient,
@@ -163,10 +172,7 @@ export class GameService {
       declared >= rules.attacksPerTurn
         ? []
         : await this.prisma.$queryRaw<{ id: string }[]>`
-      WITH edges AS (
-        SELECT "aId" AS x, "bId" AS y FROM "GeoAdjacency"
-        UNION ALL SELECT "bId", "aId" FROM "GeoAdjacency"
-      ), sources AS (
+      WITH edges AS (${reachEdges(matchId)}), sources AS (
         SELECT tu."geoUnitId" AS unit
         FROM "Territory" t JOIN "TerritoryUnit" tu ON tu."territoryId" = t.id
         WHERE t."matchId" = ${matchId} AND t."ownerEmpireId" = ${mine.id} AND t.resources >= 1
@@ -210,10 +216,7 @@ export class GameService {
       payerIds.length === 0
         ? []
         : await this.prisma.$queryRaw<{ id: number }[]>`
-      WITH edges AS (
-        SELECT "aId" AS x, "bId" AS y FROM "GeoAdjacency"
-        UNION ALL SELECT "bId", "aId" FROM "GeoAdjacency"
-      ), payers AS (
+      WITH edges AS (${reachEdges(matchId)}), payers AS (
         SELECT tu."geoUnitId" AS unit
         FROM "Territory" t JOIN "TerritoryUnit" tu ON tu."territoryId" = t.id
         WHERE t.id = ANY(${payerIds})
@@ -300,8 +303,10 @@ export class GameService {
     if (!unit) throw notFound("Municipality");
     const { territory } = unit;
 
-    const [neighbours, mine] = await Promise.all([
+    // Who borders it, to be listed; and who can reach it, by land or from a port.
+    const [neighbours, reachers, mine] = await Promise.all([
       neighboursOf(this.prisma, matchId, territory.id),
+      reachersOf(this.prisma, matchId, territory.id),
       viewer
         ? this.prisma.empire.findFirst({
             where: { matchId, userId: viewer.user.id, status: "ACTIVE" },
@@ -320,7 +325,7 @@ export class GameService {
     if (mine && match.status === "ONGOING" && territory.ownerEmpireId === null) {
       // The player's territories that touch this one and could pay for it.
       const ids = [
-        ...new Set(neighbours.filter((n) => n.ownerEmpireId === mine.id).map((n) => n.territoryId)),
+        ...new Set(reachers.filter((n) => n.ownerEmpireId === mine.id).map((n) => n.territoryId)),
       ];
       const payers = await this.prisma.territory.findMany({
         where: { id: { in: ids } },
@@ -365,7 +370,7 @@ export class GameService {
     let attack = null;
     if (mine && match.status === "ONGOING" && territory.ownerEmpireId && !own && !ally) {
       const ids = [
-        ...new Set(neighbours.filter((n) => n.ownerEmpireId === mine.id).map((n) => n.territoryId)),
+        ...new Set(reachers.filter((n) => n.ownerEmpireId === mine.id).map((n) => n.territoryId)),
       ];
       const sources = await this.prisma.territory.findMany({
         where: { id: { in: ids } },
@@ -472,9 +477,12 @@ export class GameService {
       if (payer?.ownerEmpireId !== empire.id) {
         throw conflict("NOT_YOUR_TERRITORY", "You can pay only from your own territories");
       }
-      const adjacent = await neighboursOf(tx, matchId, payer.id);
-      if (!adjacent.some((n) => n.territoryId === target.territory.id)) {
-        throw conflict("NOT_ADJACENT", "The paying territory does not border the target");
+      const reachers = await reachersOf(tx, matchId, target.territory.id);
+      if (!reachers.some((reacher) => reacher.territoryId === payer.id)) {
+        throw conflict(
+          "NOT_ADJACENT",
+          "The paying territory neither borders the target nor reaches it from a port",
+        );
       }
       if (payer.inBattle) {
         throw conflict("TERRITORY_IN_BATTLE", "A territory in a battle cannot spend resources");
@@ -541,6 +549,15 @@ export class GameService {
         territoryId: target.territory.id,
         data: { empireName: empire.name, territoryName: target.territory.name },
       });
+      // On the sea there may be a port already: more often on an island than along a coast.
+      if (await onSea(tx, target.territory.id)) {
+        const chance = (await isIsland(tx, target.territory.id))
+          ? rules.portFoundIslandPct
+          : rules.portFoundCoastPct;
+        if (this.random() * 100 < chance) {
+          await grantPort(tx, matchId, empire.id, target.territory.id, match.currentTurn);
+        }
+      }
     });
     this.onChange(matchId, "territories");
     return this.matches.state(matchId, viewer);

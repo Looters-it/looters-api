@@ -12,7 +12,12 @@ export type StructureEffect =
   /** The territory cannot start or join an attack. */
   | "NO_ATTACK_FROM"
   /** If the main capital is conquered this territory becomes the capital and the empire survives. */
-  | "BACKUP_CAPITAL";
+  | "BACKUP_CAPITAL"
+  /**
+   * From this territory the empire reaches every territory on the sea, bordering or
+   * not: to attack it or to annex it. It stays with the territory when it is conquered.
+   */
+  | "SEA_REACH";
 
 /** Why a structure cannot be built on a territory. Codes are translated by the web interface. */
 export type StructureBlock =
@@ -21,6 +26,7 @@ export type StructureBlock =
   | "ALREADY_HERE"
   | "ONE_PER_EMPIRE"
   | "COOLDOWN"
+  | "NOT_ON_COAST"
   | "NOT_ENOUGH_RESOURCES";
 
 export interface StructureSite {
@@ -34,6 +40,8 @@ export interface StructureSite {
   /** Last turn of the cooldown after a previous one of this type here, if any. */
   cooldownUntilTurn: number | null;
   currentTurn: number;
+  /** Whether the territory has access to the sea. */
+  coastal: boolean;
 }
 
 /**
@@ -54,6 +62,8 @@ export interface StructureDefinition {
   maxPerEmpire?: number;
   /** Cannot be built on the capital. */
   notOnCapital?: boolean;
+  /** Only on a territory with access to the sea. */
+  onCoastOnly?: boolean;
   /** Turns between two moves to another own territory, if it can be moved at all. */
   moveEveryTurns?(rules: MatchRules): number;
   effects: StructureEffect[];
@@ -82,6 +92,7 @@ export function structureBlock(
 ): StructureBlock | null {
   if (site.inBattle) return "IN_BATTLE";
   if (definition.notOnCapital && site.isCapital) return "ON_CAPITAL";
+  if (definition.onCoastOnly && !site.coastal) return "NOT_ON_COAST";
   if (site.activeHere) return "ALREADY_HERE";
   if (definition.maxPerEmpire !== undefined && site.ownedByEmpire >= definition.maxPerEmpire) {
     return "ONE_PER_EMPIRE";
@@ -113,4 +124,17 @@ registerStructure({
   notOnCapital: true,
   moveEveryTurns: (rules) => rules.capitalMoveEveryTurns,
   effects: ["BACKUP_CAPITAL"],
+});
+
+/**
+ * Port: from the territory it stands on, every territory on the sea can be reached,
+ * islands and coasts that share no border with the empire. Built where there is sea;
+ * an island that an empire starts from has one, and one may be found on annexing.
+ */
+registerStructure({
+  type: "PORT",
+  cost: (rules) => rules.portCost,
+  durationTurns: () => null,
+  onCoastOnly: true,
+  effects: ["SEA_REACH"],
 });

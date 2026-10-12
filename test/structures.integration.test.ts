@@ -23,12 +23,14 @@ describe("structure catalogue", () => {
     activeHere: false,
     cooldownUntilTurn: null,
     currentTurn: 10,
+    coastal: false,
   };
 
-  it("declares the two structures of the game with their costs and durations", () => {
+  it("declares the structures of the game with their costs and durations", () => {
     expect(structureCatalogue().map((definition) => definition.type)).toEqual([
       "BLOCK",
       "SECOND_CAPITAL",
+      "PORT",
     ]);
     const block = structureDefinition("BLOCK");
     const second = structureDefinition("SECOND_CAPITAL");
@@ -59,6 +61,11 @@ describe("structure catalogue", () => {
     expect(structureBlock(second, { ...site, ownedByEmpire: 1 }, 10)).toBe("ONE_PER_EMPIRE");
     // A block may stand on the capital.
     expect(structureBlock(block, { ...site, isCapital: true }, 300)).toBeNull();
+    // A port needs the sea.
+    const port = defined("PORT");
+    expect(port.cost(DEFAULT_MATCH_RULES, 70)).toBe(100);
+    expect(structureBlock(port, site, 100)).toBe("NOT_ON_COAST");
+    expect(structureBlock(port, { ...site, coastal: true }, 100)).toBeNull();
   });
 });
 
@@ -217,6 +224,112 @@ describe.skipIf(!url)("structures and merged areas", () => {
     });
   const errorCode = (response: { json: () => unknown }) =>
     (response.json() as { error?: { code: string } }).error?.code;
+
+  describe("port", () => {
+    const onSea = (...indexes: number[]) =>
+      prisma.geoUnit.updateMany({
+        where: { id: { in: indexes.map((index) => unit[index] ?? 0) } },
+        data: { coastal: true },
+      });
+
+    it("is built only where there is sea, for 100, and stays", async () => {
+      await onSea(0, 5);
+      const inland = await build("anna", "PORT", 1);
+      expect(inland.statusCode).toBe(409);
+      expect(inland.json<{ error: { code: string } }>().error.code).toBe("STRUCTURE_NOT_ON_COAST");
+
+      const built = await build("anna", "PORT", 0);
+      expect(built.statusCode).toBe(201);
+      const after = built.json<State>();
+      const port = after.structures.find((structure) => structure.type === "PORT");
+      expect(port).toMatchObject({ territoryId: await idOf(0), turnsLeft: null });
+      expect(port?.effects).toEqual(["SEA_REACH"]);
+      expect(after.territories.find((t) => t.geoUnitIds.includes(unit[0] ?? 0))?.resources).toBe(
+        1900,
+      );
+    });
+
+    it("reaches a territory on the sea that shares no border, to attack it", async () => {
+      await onSea(0, 5);
+      // Bruno's 5 does not touch anything of Anna's: without a port it is out of reach.
+      const before = await as("anna", "POST", `/api/matches/${matchId}/attacks`, {
+        targetGeoUnitId: unit[5],
+        fromTerritoryIds: [await idOf(0)],
+        turn: 10,
+      });
+      expect(before.json<{ error: { code: string } }>().error.code).toBe("NOT_ADJACENT");
+
+      expect((await build("anna", "PORT", 0)).statusCode).toBe(201);
+      await setPhase(prisma, matchId, "ACTION");
+      const targets = (await as("anna", "GET", `/api/matches/${matchId}/targets`)).json<{
+        territoryIds: string[];
+      }>();
+      expect(targets.territoryIds).toContain(await idOf(5));
+      // From the port, not from a territory that has none.
+      const elsewhere = await as("anna", "POST", `/api/matches/${matchId}/attacks`, {
+        targetGeoUnitId: unit[5],
+        fromTerritoryIds: [await idOf(1)],
+        turn: 10,
+      });
+      expect(elsewhere.json<{ error: { code: string } }>().error.code).toBe("NOT_ADJACENT");
+      const attack = await as("anna", "POST", `/api/matches/${matchId}/attacks`, {
+        targetGeoUnitId: unit[5],
+        fromTerritoryIds: [await idOf(0)],
+        turn: 10,
+      });
+      expect(attack.statusCode).toBe(201);
+    });
+
+    it("annexes across the sea, and may find a port already there", async () => {
+      await onSea(0, 5);
+      const match = await prisma.match.findUniqueOrThrow({ where: { id: matchId } });
+      await prisma.match.update({
+        where: { id: matchId },
+        data: { config: { ...(match.config as object), portFoundCoastPct: 100 } },
+      });
+      await prisma.territory.update({
+        where: { id: await idOf(5) },
+        data: { ownerEmpireId: null },
+      });
+      expect((await build("anna", "PORT", 0)).statusCode).toBe(201);
+      const annexed = await as("anna", "POST", `/api/matches/${matchId}/annex`, {
+        geoUnitId: unit[5],
+        payFromTerritoryId: await idOf(0),
+        turn: 10,
+      });
+      expect(annexed.statusCode).toBe(200);
+      const ports = annexed.json<State>().structures.filter((s) => s.type === "PORT");
+      expect(ports.map((port) => port.territoryId).sort()).toEqual(
+        [await idOf(0), await idOf(5)].sort(),
+      );
+    });
+
+    it("stands already on the island an empire starts from", async () => {
+      await prisma.geoUnit.update({
+        where: { id: unit[4] ?? 0 },
+        data: { isolation: "ISLAND", coastal: true },
+      });
+      await prisma.territory.update({
+        where: { id: await idOf(4) },
+        data: { ownerEmpireId: null },
+      });
+      const registered = await app.inject({
+        method: "POST",
+        url: "/api/auth/register",
+        payload: { username: "carla", email: "carla@example.test", password: "password-123" },
+      });
+      cookies.carla = `sid=${registered.cookies.find((c) => c.name === "sid")?.value ?? ""}`;
+      const joined = await as("carla", "POST", `/api/matches/${matchId}/join`, {
+        geoUnitId: unit[4],
+        empire: { name: "carla", color: EMPIRE_COLORS[2], emblem: "torre", motto: null },
+      });
+      expect(joined.statusCode).toBeLessThan(300);
+      const port = await prisma.structure.findFirst({
+        where: { territoryId: await idOf(4), type: "PORT", active: true },
+      });
+      expect(port?.data).toMatchObject({ effects: ["SEA_REACH"] });
+    });
+  });
 
   describe("military block", () => {
     it("costs 150 from the territory, lasts five turns and is public", async () => {

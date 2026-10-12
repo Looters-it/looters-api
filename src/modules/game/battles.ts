@@ -6,7 +6,7 @@ import { costOf, planAttack } from "../../rules/attack.js";
 import type { MatchRules } from "../../rules/config.js";
 import type { MatchService } from "../matches/service.js";
 import { areAllies } from "./alliances.js";
-import { acting, conflict, lockTerritories, neighboursOf } from "./shared.js";
+import { acting, conflict, lockTerritories, reachersOf } from "./shared.js";
 import { moveTurnClose } from "../../queue/jobs.js";
 
 export const attackBody = z.strictObject({
@@ -113,7 +113,8 @@ export class BattleService {
     if (target.inBattle) throw conflict("TERRITORY_IN_BATTLE", "The target is already in a battle");
 
     const adjacent = new Set(
-      (await neighboursOf(tx, matchId, target.id)).map((neighbour) => neighbour.territoryId),
+      // By land, or by sea from a territory with a port.
+      (await reachersOf(tx, matchId, target.id)).map((reacher) => reacher.territoryId),
     );
     const usable = sources.map((source) => {
       if (source?.ownerEmpireId !== attackerEmpireId) {

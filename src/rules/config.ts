@@ -60,6 +60,11 @@ const matchRulesBase = z.strictObject({
   blockCost: count.default(150),
   blockTurns: count.default(5),
   blockCooldownTurns: count.default(5),
+  // The port: what it costs to build, and how likely one is found already there when a
+  // free municipality on the sea is annexed, on an island and along a coast.
+  portCost: count.default(100),
+  portFoundIslandPct: pct.default(50),
+  portFoundCoastPct: pct.default(20),
 
   // Alliances (§2.6, §9 #9)
   // Alliances are pacts between two empires: this is how many an empire may hold at once.

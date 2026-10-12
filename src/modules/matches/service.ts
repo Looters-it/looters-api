@@ -709,6 +709,23 @@ export class MatchService {
         data: { capitalTerritoryId: unit.territoryId },
       });
       const territory = await tx.territory.findUniqueOrThrow({ where: { id: unit.territoryId } });
+      // An empire that starts from an island has a port there: its only way out.
+      const island = await tx.$queryRaw<{ island: boolean | null }[]>`
+        SELECT bool_or(u.isolation = 'ISLAND') AS island
+        FROM "TerritoryUnit" tu JOIN "GeoUnit" u ON u.id = tu."geoUnitId"
+        WHERE tu."territoryId" = ${territory.id}`;
+      if (island[0]?.island) {
+        await tx.structure.create({
+          data: {
+            matchId: id,
+            territoryId: territory.id,
+            empireId: empire.id,
+            type: "PORT",
+            builtTurn: match.currentTurn,
+            data: { effects: ["SEA_REACH"], found: true },
+          },
+        });
+      }
       await recordEvent(tx, id, match.currentTurn, {
         type: "EMPIRE_CREATED",
         empireId: empire.id,
