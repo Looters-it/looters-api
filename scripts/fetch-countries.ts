@@ -30,6 +30,9 @@
  *   three in a form that can be read here. The Greenlandic ones are drawn there with straight lines out at sea, so
  *   they are cut along the coast of Natural Earth (public domain), and the land that no
  *   municipality has, the national park of the north-east, is added as a territory.
+ *   Five municipalities being too few to play on, and nothing official splitting them, each
+ *   is shared out among its towns and villages (OpenStreetMap again): a place takes the
+ *   land nearest to it, and the municipalities become the regions.
  * - Sweden (Lantmäteriet, CC0), Germany (BKG, Data licence Germany 2.0; the land without a
  *   municipality is kept as territories), Belgium (NGI), the Netherlands (CBS/Kadaster 2021,
  *   CC0), Spain (IGN, CC BY 4.0) and Portugal (DGT, its 308 municipalities): Opendatasoft.
@@ -52,7 +55,8 @@
  *   municipalities), Lithuania (elderships), Belarus and Ukraine (districts), Moldova,
  *   Czechia, Slovakia, Hungary, Romania, Bulgaria, Slovenia, Croatia, Bosnia and Herzegovina,
  *   Serbia, Montenegro, Kosovo, North Macedonia and Albania. Those it has no regions for
- *   stay whole. For Czechia, Slovakia and Hungary, whose names it has spoilt, the names
+ *   stay whole. Greece, Russia (its districts, without the tip of Chukotka past the 180th
+ *   meridian), Turkey (districts in provinces), Cyprus and Malta come from it too. For Czechia, Slovakia and Hungary, whose names it has spoilt, the names
  *   are Eurostat's (GISCO, local administrative units 2024).
  *
  * Where a source does not say the region of a municipality, it is the region whose
@@ -60,6 +64,7 @@
  */
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { Delaunay } from "d3-delaunay";
 import polygonClipping, { type MultiPolygon } from "polygon-clipping";
 
 interface Feature {
@@ -218,7 +223,13 @@ function boundaries(iso: string, level: number, regionLevel: number | null, whol
     decimals: 4,
     ...(regionLevel === null
       ? {}
-      : { regions: { url: file(regionLevel), name: (p) => unshouted(text(p.shapeName)) } }),
+      : {
+          regions: {
+            url: file(regionLevel),
+            // A long name comes cut short, with a star where it was cut.
+            name: (p) => unshouted(text(p.shapeName).replace(/\s*\*$/, "")),
+          },
+        }),
     unit: (feature) => {
       const unit = boundaryUnit(whole)(feature);
       // Without the words that only say it is a municipality, and not shouted.
@@ -308,7 +319,17 @@ interface Source {
    * The land of the country, for municipalities drawn out at sea: they are cut along it,
    * and its largest part that none of them has becomes a territory called `rest`.
    */
-  land?: { url: string; is: (properties: Record<string, unknown>) => boolean; rest: string };
+  land?: {
+    url: string;
+    is: (properties: Record<string, unknown>) => boolean;
+    rest: string;
+    restRegion?: string;
+  };
+  /**
+   * What to ask Overpass for the inhabited places of the country (nodes): each unit
+   * becomes a region, split among the places inside it, each with the land nearest to it.
+   */
+  settlements?: string;
   /**
    * The regions as shapes, for a source that does not name the region of a municipality:
    * each goes to the one most of it falls in.
@@ -407,7 +428,12 @@ const COUNTRIES: Record<string, Source> = {
       url: NATURAL_EARTH,
       is: (properties) => properties.ADM0_A3 === "GRL",
       rest: "Kalaallit Nunaanni nuna eqqissisimatitaq",
+      // The park has no municipality: it goes with the one it shares most of its border with.
+      restRegion: "Sermersooq",
     },
+    // Five municipalities are too few to play on, and nothing official splits them: each
+    // is shared out among its towns and villages, every place taking the land nearest to it.
+    settlements: `area["ISO3166-1"="GL"][admin_level~"^(2|3)$"]->.a;node(area.a)[place~"^(city|town|village)$"][name];`,
     unit: osmUnit("Kalaallit Nunaat"),
   },
   sweden: {
@@ -604,6 +630,25 @@ const COUNTRIES: Record<string, Source> = {
   kosovo: boundaries("XKX", 2, null, "Kosovo"),
   "north-macedonia": boundaries("MKD", 2, 1),
   albania: boundaries("ALB", 3, 1),
+  greece: boundaries("GRC", 3, 2),
+  russia: {
+    ...boundaries("RUS", 2, 1),
+    // The tip of Chukotka lies past the 180th meridian: left out, like the Aleutians, so
+    // that the country does not stretch round the world.
+    unit: (feature) => {
+      const unit = boundaries("RUS", 2, 1).unit(feature);
+      if (!unit) return null;
+      const east = (polygons(unit.geometry) as Position[][][]).filter(
+        (polygon) => (polygon[0]?.[0]?.[0] ?? 0) > 0,
+      );
+      return east.length > 0
+        ? { ...unit, geometry: { type: "MultiPolygon", coordinates: east } }
+        : null;
+    },
+  },
+  turkey: boundaries("TUR", 2, 1),
+  cyprus: boundaries("CYP", 2, 1),
+  malta: boundaries("MLT", 1, null, "Malta"),
   andorra: {
     url: `${GEOBOUNDARIES}/AND/ADM1/geoBoundaries-AND-ADM1.geojson`,
     unit: boundaryUnit("Andorra"),
@@ -821,19 +866,62 @@ function osmFeature(relation: OsmRelation): Feature {
   };
 }
 
+/**
+ * A plane laid on the globe at a point, on which distances and directions from that
+ * point are true (azimuthal equidistant): there and back, in metres.
+ */
+function azimuthal([lon0, lat0]: Position) {
+  const radians = Math.PI / 180;
+  const earth = 6_371_000;
+  const [l0, p0] = [lon0 * radians, lat0 * radians];
+  return {
+    to: ([lon, lat]: Position): Position => {
+      const [l, p] = [lon * radians, lat * radians];
+      const cosine = Math.sin(p0) * Math.sin(p) + Math.cos(p0) * Math.cos(p) * Math.cos(l - l0);
+      const angle = Math.acos(Math.min(1, Math.max(-1, cosine)));
+      const k = angle === 0 ? 1 : angle / Math.sin(angle);
+      return [
+        earth * k * Math.cos(p) * Math.sin(l - l0),
+        earth * k * (Math.cos(p0) * Math.sin(p) - Math.sin(p0) * Math.cos(p) * Math.cos(l - l0)),
+      ];
+    },
+    from: ([x, y]: Position): Position => {
+      const distance = Math.hypot(x, y);
+      if (distance === 0) return [lon0, lat0];
+      const angle = distance / earth;
+      const p = Math.asin(
+        Math.cos(angle) * Math.sin(p0) + (y * Math.sin(angle) * Math.cos(p0)) / distance,
+      );
+      const l =
+        l0 +
+        Math.atan2(
+          x * Math.sin(angle),
+          distance * Math.cos(p0) * Math.cos(angle) - y * Math.sin(p0) * Math.sin(angle),
+        );
+      return [l / radians, p / radians];
+    },
+  };
+}
+
 /** The public servers are often busy: each is tried in turn, a few times round. */
 async function fromOverpass(query: string): Promise<Feature[]> {
+  const relations = await overpass<OsmRelation>(`${query}out geom;`);
+  return relations.map(osmFeature);
+}
+
+/** Asks Overpass, and gives back the elements of its answer. */
+async function overpass<Element>(query: string): Promise<Element[]> {
   for (let round = 0; round < 8; round++) {
     for (const server of OVERPASS) {
       const response = await fetch(server, {
         method: "POST",
         headers: { "user-agent": "looters-geodata/1.0 (areas fetch script)" },
-        body: new URLSearchParams({ data: `[out:json][timeout:180];${query}out geom;` }),
+        body: new URLSearchParams({ data: `[out:json][timeout:180];${query}` }),
         signal: AbortSignal.timeout(240_000),
       }).catch(() => null);
       const answer = response?.ok ? await response.text() : "";
       if (answer.startsWith("{")) {
-        return (JSON.parse(answer) as { elements: OsmRelation[] }).elements.map(osmFeature);
+        return (JSON.parse(answer) as { elements: Element[] }).elements;
       }
       console.log(`  ${server}: ${String(response?.status ?? "no answer")}, trying the next`);
       await new Promise((resolve) => setTimeout(resolve, 10_000));
@@ -951,11 +1039,16 @@ for (const [country, source] of Object.entries(COUNTRIES)) {
     }
     const lost = units.filter((unit) => !unit.region);
     if (lost.length > 0) {
-      console.log(`  in no region: ${lost.map((unit) => unit.name).join(", ")}`);
+      // Left out: alone in the country, outside every region, it would be an area by itself.
+      console.log(`  in no region, left out: ${lost.map((unit) => unit.name).join(", ")}`);
+      for (const unit of lost) units.splice(units.indexOf(unit), 1);
     }
   }
   await source.named?.(units);
   units.push(...((await source.more?.()) ?? []));
+  // As drawn by the source, before the coast cuts them: a place on the shore may fall
+  // just off the coast, but not off the municipality it belongs to.
+  const drawn = new Map(units.map((unit) => [unit, polygons(unit.geometry) as Position[][][]]));
   if (source.land) {
     const land = (await fromUrl(source.land.url)).filter((feature) =>
       source.land?.is(feature.properties),
@@ -977,7 +1070,7 @@ for (const [country, source] of Object.entries(COUNTRIES)) {
       return (Math.max(...xs) - Math.min(...xs)) * (Math.max(...ys) - Math.min(...ys));
     };
     const largest = free.sort((a, b) => extent(b) - extent(a))[0];
-    const region = units[0]?.region ?? country;
+    const region = source.land.restRegion ?? units[0]?.region ?? country;
     if (largest) {
       units.push({
         name: source.land.rest,
@@ -986,6 +1079,78 @@ for (const [country, source] of Object.entries(COUNTRIES)) {
         within: region,
         geometry: { type: "MultiPolygon", coordinates: [largest] },
       });
+    }
+  }
+  if (source.settlements) {
+    const places = await overpass<{
+      id: number;
+      lon: number;
+      lat: number;
+      tags: Record<string, string>;
+    }>(`${source.settlements}out;`);
+    const whole = [...units];
+    units.length = 0;
+    const placed = new Set<number>();
+    for (const unit of whole) {
+      const outline = drawn.get(unit);
+      // What no place lies in (the park) stays one territory, in the region it was given.
+      // A place drawn twice under one name counts once.
+      const names = new Set<string>();
+      const inhabited = (
+        outline
+          ? places.filter((place) =>
+              outline.some((polygon) => inside([place.lon, place.lat], polygon[0] ?? [])),
+            )
+          : []
+      ).filter((place) => {
+        placed.add(place.id);
+        const name = place.tags.name ?? "";
+        return !names.has(name) && names.add(name);
+      });
+      if (inhabited.length === 0) {
+        units.push(unit);
+        continue;
+      }
+      // Nearest on the ground, not on the grid of the degrees: the plane the cells are
+      // drawn on keeps distances from the middle of the unit true.
+      const middle: Position = [
+        inhabited.reduce((sum, place) => sum + place.lon, 0) / inhabited.length,
+        inhabited.reduce((sum, place) => sum + place.lat, 0) / inhabited.length,
+      ];
+      const plane = azimuthal(middle);
+      const points = inhabited.map((place) => plane.to([place.lon, place.lat]));
+      const voronoi = Delaunay.from(points).voronoi([-4e6, -4e6, 4e6, 4e6]);
+      const landOfUnit = polygons(unit.geometry) as MultiPolygon;
+      inhabited.forEach((place, index) => {
+        const cell = voronoi.cellPolygon(index) as Position[] | null;
+        if (!cell) return;
+        // The sides of a cell are long: more points along them, so that they stay the
+        // same line once back on the globe.
+        const ring = cell.flatMap((point, at) => {
+          const next = cell[(at + 1) % cell.length] ?? point;
+          return Array.from({ length: 16 }, (_, part) =>
+            plane.from([
+              point[0] + ((next[0] - point[0]) * part) / 16,
+              point[1] + ((next[1] - point[1]) * part) / 16,
+            ]),
+          );
+        });
+        const first = ring[0];
+        if (!first) return;
+        const coordinates = polygonClipping.intersection(landOfUnit, [[[...ring, first]]]);
+        if (coordinates.length === 0) return;
+        units.push({
+          name: place.tags.name ?? "",
+          code: `osm-node-${String(place.id)}`,
+          region: unit.name,
+          within: unit.name,
+          geometry: { type: "MultiPolygon", coordinates },
+        });
+      });
+    }
+    const astray = places.filter((place) => !placed.has(place.id));
+    if (astray.length > 0) {
+      console.log(`  in no unit: ${astray.map((place) => place.tags.name ?? "").join(", ")}`);
     }
   }
 
