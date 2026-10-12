@@ -1,5 +1,6 @@
 import type { FastifyInstance, InjectOptions } from "fastify";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import { setPhase } from "./phase.js";
 import { buildApp } from "../src/app.js";
 import { createPrisma } from "../src/db/prisma.js";
 import { BotRunner } from "../src/modules/bots/runner.js";
@@ -15,6 +16,7 @@ interface State {
   empires: { id: string; name: string; username: string; isBot: boolean; units: number }[];
   territories: { id: string; ownerEmpireId: string; geoUnitIds: number[] }[];
   battles: { id: string; status: string; response: string | null }[];
+  structures: { type: string; empireId: string; territoryId: string; level: number | null }[];
 }
 
 describe.skipIf(!url)("bots", () => {
@@ -219,6 +221,67 @@ describe.skipIf(!url)("bots", () => {
     await prisma.match.update({ where: { id: matchId }, data: { currentTurn: 6 } });
     await app.bots.playTurn(matchId);
     expect(await unitsOf()).toBe(3);
+  });
+
+  it("builds an airport, widens it, and annexes through it what its borders do not touch", async () => {
+    await prisma.match.update({
+      where: { id: matchId },
+      data: { config: { ...DEFAULT_MATCH_RULES, botsEnabled: true, botsMax: 1 } },
+    });
+    // The bot at the far end, shut in by Anna: 4 is hers, and 1, 2, 3 are free and out of reach.
+    const user = await prisma.user.create({
+      data: { username: "bot_test", email: "bot@looters.invalid", passwordHash: "!", isBot: true },
+    });
+    const empire = await prisma.empire.create({
+      data: {
+        matchId,
+        userId: user.id,
+        name: "Bot di prova",
+        color: EMPIRE_COLORS[1] ?? "",
+        emblem: "luna",
+      },
+    });
+    const territoryOf = async (index: number) =>
+      (
+        await prisma.territoryUnit.findUniqueOrThrow({
+          where: { matchId_geoUnitId: { matchId, geoUnitId: unit[index] ?? 0 } },
+        })
+      ).territoryId;
+    const annas = (await prisma.empire.findFirstOrThrow({ where: { matchId, name: "Anna" } })).id;
+    await prisma.territory.update({
+      where: { id: await territoryOf(4) },
+      data: { ownerEmpireId: annas, resources: 500 },
+    });
+    const home = await territoryOf(5);
+    await prisma.territory.update({
+      where: { id: home },
+      data: { ownerEmpireId: empire.id, resources: 3000 },
+    });
+    await prisma.empire.update({ where: { id: empire.id }, data: { capitalTerritoryId: home } });
+    // Every choice left to chance is taken, and nothing waits.
+    (app.bots as unknown as { random: () => number }).random = () => 0;
+    app.bots.pause = () => Promise.resolve();
+    const structures = async () =>
+      (await state()).structures.filter((structure) => structure.empireId === empire.id);
+
+    await setPhase(prisma, matchId, "PRELIMINARY");
+    await app.bots.playTurn(matchId);
+    // Away from the sea there is no port to build: an airport, at its first level.
+    expect((await structures()).find((s) => s.type === "AIRPORT")).toMatchObject({
+      territoryId: home,
+      level: 1,
+    });
+    expect((await structures()).some((s) => s.type === "PORT")).toBe(false);
+    expect((await bots())[0]?.units).toBe(1);
+
+    // The next time it puts its empire in order, the airport reaches further.
+    await app.bots.playTurn(matchId);
+    expect((await structures()).find((s) => s.type === "AIRPORT")).toMatchObject({ level: 2 });
+
+    // And in the part of the turn where things are taken, it takes what the airport reaches.
+    await setPhase(prisma, matchId, "ACTION");
+    await app.bots.playTurn(matchId);
+    expect((await bots())[0]?.units).toBe(1 + DEFAULT_MATCH_RULES.annexPerTurn);
   });
 
   it("answers an attack on its own, and attacks through the same rules as a player", async () => {

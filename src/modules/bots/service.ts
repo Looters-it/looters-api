@@ -40,6 +40,13 @@ const viewerOf = (user: { id: string; username: string }): AuthContext => ({
  * lock and limit applies to it as it is, and it knows only what a player in
  * its place would be shown: it never reads another empire's resources.
  */
+/** How often a bot that can build a port, or an airport, does; and widens one it has. */
+const BOT_PORT_CHANCE = 0.25;
+const BOT_AIRPORT_CHANCE = 0.1;
+const BOT_UPGRADE_CHANCE = 0.1;
+/** How many far targets a bot tries in a turn before it gives up. */
+const FAR_TRIES = 3;
+
 export class BotService {
   /** Failures that are not the game saying no: for the log. */
   onError: (error: unknown, context: { matchId: string; empireId?: string }) => void = () =>
@@ -292,21 +299,50 @@ export class BotService {
     }
   }
 
-  /** What a bot does in the preliminary part of a turn: once in a while, a block on its capital. */
+  /**
+   * What a bot does in the preliminary part of a turn: once in a while a block on its
+   * capital, a port or an airport where one can be built, and a wider range for one it has.
+   */
   private async prepare(
     matchId: string,
     bot: { id: string; capitalTerritoryId: string | null; user: { id: string; username: string } },
     turn: number,
   ) {
+    const viewer = viewerOf(bot.user);
     const capital = bot.capitalTerritoryId;
-    if (!capital || this.random() >= 0.1) return;
-    await this.attempt(() =>
-      this.structures.build(
-        matchId,
-        { type: "BLOCK", territoryId: capital, turn },
-        viewerOf(bot.user),
-      ),
-    );
+    if (capital && this.random() < 0.1) {
+      await this.attempt(() =>
+        this.structures.build(matchId, { type: "BLOCK", territoryId: capital, turn }, viewer),
+      );
+    }
+
+    // What reaches far: one of each kind is enough for a bot, the port first.
+    const catalogue = (await this.attempt(() => this.structures.catalogue(matchId, viewer))) ?? [];
+    const state = await this.attempt(() => this.matches.state(matchId, viewer));
+    const mine = state?.structures.filter((s) => s.empireId === bot.id) ?? [];
+    for (const [effect, chance] of [
+      ["SEA_REACH", BOT_PORT_CHANCE],
+      ["AIR_REACH", BOT_AIRPORT_CHANCE],
+    ] as const) {
+      if (mine.some((structure) => structure.effects.includes(effect))) continue;
+      const entry = catalogue.find((candidate) => candidate.effects.includes(effect));
+      // Where it holds the most: the place is paid for by the territory it stands on.
+      const site = entry?.sites
+        .filter((candidate) => candidate.blocked === null)
+        .sort((a, b) => b.resources - a.resources)[0];
+      if (!entry || !site || this.random() >= chance) continue;
+      await this.attempt(() =>
+        this.structures.build(
+          matchId,
+          { type: entry.type, territoryId: site.territoryId, turn },
+          viewer,
+        ),
+      );
+    }
+    for (const structure of mine) {
+      if (!structure.upgrade || this.random() >= BOT_UPGRADE_CHANCE) continue;
+      await this.attempt(() => this.structures.upgrade(matchId, structure.id, { turn }, viewer));
+    }
   }
 
   /** One bot's turn: answer what waits for an answer, grow, and sometimes strike. */
@@ -355,8 +391,29 @@ export class BotService {
       if (!annexed) break;
     }
 
+    // What its borders do not touch, and a port or an airport reaches: the map tells a
+    // bot what it tells a player.
+    const far = await this.attempt(() => this.game.targets(matchId, viewer));
+    for (const geoUnitId of this.shuffled(far?.annexUnitIds ?? []).slice(0, FAR_TRIES)) {
+      if (!state.me || state.me.annexLeft <= 0) break;
+      const payer = (await cardOf(geoUnitId))?.annex?.payFrom.find((p) => p.usable);
+      if (!payer) continue;
+      const next = await this.attempt(() =>
+        this.game.annex(
+          matchId,
+          { geoUnitId, payFromTerritoryId: payer.territoryId, turn },
+          viewer,
+        ),
+      );
+      if (next) {
+        state = next;
+        await this.pause(this.stepMs);
+      }
+    }
+
     // Attack a neighbour, about every other turn.
     if (this.random() < 0.5) {
+      let struck = false;
       for (const territory of own()) {
         const card = await cardOf(territory.geoUnitIds[0] ?? 0);
         const enemy = this.pick(
@@ -372,6 +429,28 @@ export class BotService {
           this.battles.declare(
             matchId,
             { targetGeoUnitId: enemy.geoUnitId, fromTerritoryIds: sources, turn },
+            viewer,
+          ),
+        );
+        if (declared) {
+          struck = true;
+          await this.pause(this.stepMs);
+          break;
+        }
+      }
+      // No neighbour to strike: across the sea or by air, where it reaches.
+      for (const territoryId of struck
+        ? []
+        : this.shuffled(far?.territoryIds ?? []).slice(0, FAR_TRIES)) {
+        const geoUnitId = state.territories.find((t) => t.id === territoryId)?.geoUnitIds[0];
+        if (geoUnitId === undefined) continue;
+        const attack = (await cardOf(geoUnitId))?.attack;
+        const sources = attack?.from.filter((s) => s.usable).map((s) => s.territoryId) ?? [];
+        if (!attack || attack.blocked !== null || sources.length === 0) continue;
+        const declared = await this.attempt(() =>
+          this.battles.declare(
+            matchId,
+            { targetGeoUnitId: geoUnitId, fromTerritoryIds: sources, turn },
             viewer,
           ),
         );
