@@ -78,18 +78,22 @@ const DANISH_REGIONS: Record<string, number[]> = {
 };
 const danishRegion = (code: string) =>
   Object.entries(DANISH_REGIONS).find(([, codes]) => codes.includes(Number(code)))?.[0];
-/** The Norwegian counties of 2024, by the first two digits of the number of a municipality. */
+/**
+ * The Norwegian counties of 2024, by the first two digits of the number of a municipality.
+ * Oslo (one municipality) and Vestfold (six) are too small to play on: each goes with
+ * the county beside it.
+ */
 const NORWEGIAN_COUNTIES: Record<string, string> = {
-  "03": "Oslo",
+  "03": "Oslo og Akershus",
   "11": "Rogaland",
   "15": "Møre og Romsdal",
   "18": "Nordland",
   "31": "Østfold",
-  "32": "Akershus",
+  "32": "Oslo og Akershus",
   "33": "Buskerud",
   "34": "Innlandet",
-  "39": "Vestfold",
-  "40": "Telemark",
+  "39": "Vestfold og Telemark",
+  "40": "Vestfold og Telemark",
   "42": "Agder",
   "46": "Vestland",
   "50": "Trøndelag",
