@@ -22,7 +22,9 @@
  *   Klimadatastyrelsen), from the copy at github.com/Neogeografen/dagi: taken in 2015, and the
  *   municipalities have not changed since 2007. The official service asks for an account.
  * - Norway: Kartverket's municipalities of 2024, CC BY 4.0, as prepared (cut along the
- *   coast) at github.com/robhop/fylker-og-kommuner.
+ *   coast) at github.com/robhop/fylker-og-kommuner. Svalbard and Jan Mayen have no
+ *   municipalities: their islands are taken from Natural Earth (public domain), each of the
+ *   larger ones a territory with the small ones around it.
  * - Faroe Islands, Iceland, Greenland: the municipalities as drawn in OpenStreetMap
  *   (© OpenStreetMap contributors, ODbL), asked to Overpass. No official source gives all
  *   three in a form that can be read here; the few municipalities they have are not split
@@ -122,6 +124,9 @@ const osmUnit =
     geometry,
   });
 
+const NATURAL_EARTH =
+  "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_10m_admin_0_countries.geojson";
+
 interface Source {
   /** A GeoJSON to download, */
   url?: string;
@@ -132,6 +137,8 @@ interface Source {
    * and its largest part that none of them has becomes a territory called `rest`.
    */
   land?: { url: string; is: (properties: Record<string, unknown>) => boolean; rest: string };
+  /** Territories that are not municipalities, from somewhere else. */
+  more?: () => Promise<Unit[]>;
   unit: (feature: Feature) => Unit | null;
 }
 
@@ -179,6 +186,7 @@ const COUNTRIES: Record<string, Source> = {
   },
   norway: {
     url: "https://raw.githubusercontent.com/robhop/fylker-og-kommuner/main/Kommuner-L.geojson",
+    more: arcticIslands,
     unit: ({ properties: p, geometry }) => {
       const county = NORWEGIAN_COUNTIES[text(p.kommunenummer).slice(0, 2)];
       return county
@@ -203,13 +211,58 @@ const COUNTRIES: Record<string, Source> = {
   greenland: {
     overpass: `relation["ISO3166-2"~"^GL-"][boundary=administrative];`,
     land: {
-      url: "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_10m_admin_0_countries.geojson",
+      url: NATURAL_EARTH,
       is: (properties) => properties.ADM0_A3 === "GRL",
       rest: "Kalaallit Nunaanni nuna eqqissisimatitaq",
     },
     unit: osmUnit("Kalaallit Nunaat"),
   },
 };
+
+/** The islands of Svalbard and Jan Mayen that are a territory each, by a point on them. */
+const ARCTIC_ISLANDS: [name: string, lon: number, lat: number][] = [
+  ["Spitsbergen", 16.1, 78.3],
+  ["Nordaustlandet", 22.5, 79.85],
+  ["Edgeøya", 22.6, 77.75],
+  ["Barentsøya", 21.2, 78.4],
+  ["Prins Karls Forland", 11.3, 78.55],
+  ["Kvitøya", 32.6, 80.16],
+  ["Kong Karls Land", 28.8, 78.9],
+  ["Hopen", 25.3, 76.6],
+  ["Bjørnøya", 19, 74.44],
+  ["Jan Mayen", -8.5, 71],
+];
+const ARCTIC_REGION = "Svalbard og Jan Mayen";
+
+/**
+ * Svalbard and Jan Mayen, which Natural Earth draws as part of Norway: every island
+ * north of the mainland or far out west, given to the nearest of the named ones.
+ */
+async function arcticIslands(): Promise<Unit[]> {
+  const norway = (await fromUrl(NATURAL_EARTH)).filter(
+    (feature) => feature.properties.ADM0_A3 === "NOR",
+  );
+  const parts = new Map<string, unknown[]>();
+  for (const polygon of norway.flatMap((feature) => polygons(feature.geometry))) {
+    const ring = (polygon as Position[][])[0] ?? [];
+    const lons = ring.map((point) => point[0]);
+    const lats = ring.map((point) => point[1]);
+    const lon = (Math.min(...lons) + Math.max(...lons)) / 2;
+    const lat = (Math.min(...lats) + Math.max(...lats)) / 2;
+    if (!(lat > 74 || (lat > 70.5 && lon < 0))) continue;
+    // A degree of longitude is a fifth of one of latitude this far north.
+    const far = ([, x, y]: (typeof ARCTIC_ISLANDS)[number]) => Math.hypot((x - lon) * 0.2, y - lat);
+    const nearest = [...ARCTIC_ISLANDS].sort((a, b) => far(a) - far(b))[0];
+    if (nearest) parts.set(nearest[0], [...(parts.get(nearest[0]) ?? []), polygon]);
+  }
+  return [...parts].map(([name, coordinates]) => ({
+    name,
+    code: `sj-${name.toLowerCase().replaceAll(" ", "-")}`,
+    region: ARCTIC_REGION,
+    within: ARCTIC_REGION,
+    geometry: { type: "MultiPolygon", coordinates },
+  }));
+}
 
 /** The servers that answer Overpass queries: the next is tried when one is busy. */
 const OVERPASS = [
@@ -341,7 +394,7 @@ for (const [country, source] of Object.entries(COUNTRIES)) {
       };
     }
   }
-  const units = [...byCode.values()];
+  const units = [...byCode.values(), ...((await source.more?.()) ?? [])];
   if (source.land) {
     const land = (await fromUrl(source.land.url)).filter((feature) =>
       source.land?.is(feature.properties),
