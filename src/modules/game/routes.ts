@@ -96,6 +96,12 @@ export function registerGameRoutes(
     return battles.respond(id, battleId, respondBody.parse(request.body), auth);
   });
 
+  app.post("/api/matches/:id/battles/:battleId/withdraw", async (request) => {
+    const auth = await guard.user(request);
+    const { id, battleId } = battleParams.parse(request.params);
+    return battles.withdraw(id, battleId, auth);
+  });
+
   // ---------- Structures and merged areas ----------
 
   app.get("/api/matches/:id/structures/catalogue", async (request) => {

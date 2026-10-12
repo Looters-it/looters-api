@@ -47,6 +47,11 @@ const matchRulesBase = z.strictObject({
   surrenderRefundPct: pct.default(50),
   // Share of what the two sides spent on a battle that goes to whoever wins it.
   battleSpoilsPct: pct.default(70),
+  // By how much one side must beat the other for a round to end the battle. Below it
+  // nobody wins: the battle stays open as a siege and is fought again the next turn.
+  // At zero every battle ends in its first round.
+  siegeMarginPct: count.default(30),
+  siegeCapitalMarginPct: count.default(60),
 
   // Capital (§2.9) and accumulation alert (§2.8)
   capitalMoveEveryTurns: count.default(3),

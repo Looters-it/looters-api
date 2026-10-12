@@ -600,6 +600,128 @@ describe.skipIf(!url)("battles", () => {
     });
   });
 
+  describe("siege", () => {
+    const respond = (user: string, battleId: string, action: string) =>
+      as(user, "POST", `/api/matches/${matchId}/battles/${battleId}/respond`, { action });
+    const withdraw = (user: string | null, battleId: string) =>
+      as(user, "POST", `/api/matches/${matchId}/battles/${battleId}/withdraw`);
+    /** A battle as jobs leaves it after a round nobody won clearly. */
+    async function besieged() {
+      await attack("anna", 3, [2]);
+      const battle = await prisma.battle.findFirstOrThrow();
+      const { currentTurn } = await prisma.match.findUniqueOrThrow({ where: { id: matchId } });
+      await prisma.battle.update({
+        where: { id: battle.id },
+        data: {
+          round: 2,
+          foughtTurn: currentTurn,
+          share: 0.52,
+          defenseCost: 10,
+          rounds: {
+            create: {
+              round: 1,
+              turn: currentTurn,
+              attackForce: battle.attackForce,
+              attackCost: battle.attackCost,
+              defenseForce: battle.defenseForce ?? 0,
+              defenseCost: 10,
+              rollAttack: 0.5,
+              rollDefense: 0.5,
+              share: 0.52,
+              result: "DRAW",
+            },
+          },
+        },
+      });
+      return battle.id;
+    }
+
+    it("is fought one round a turn: until the next it can only be given up", async () => {
+      const battleId = await besieged();
+      expect(errorCode(await respond("bruno", battleId, "DEFEND"))).toBe("ROUND_FOUGHT");
+      expect(handedOver).toHaveLength(0);
+
+      await prisma.match.update({
+        where: { id: matchId },
+        data: { currentTurn: { increment: 1 } },
+      });
+      expect((await respond("bruno", battleId, "DEFEND")).statusCode).toBe(200);
+      expect(handedOver).toEqual([{ battleId, matchId }]);
+    });
+
+    it("can be surrendered in the turn of a round already fought", async () => {
+      const battleId = await besieged();
+      expect((await respond("bruno", battleId, "SURRENDER")).statusCode).toBe(200);
+      expect(handedOver).toEqual([{ battleId, matchId }]);
+    });
+
+    it("is given up by the attacker only, and only once it is a siege", async () => {
+      await attack("anna", 3, [2]);
+      const first = (await prisma.battle.findFirstOrThrow()).id;
+      expect(errorCode(await withdraw("anna", first))).toBe("NOT_A_SIEGE");
+      await prisma.battle.update({ where: { id: first }, data: { round: 2 } });
+
+      expect((await withdraw(null, first)).statusCode).toBe(401);
+      expect(errorCode(await withdraw("bruno", first))).toBe("NOT_THE_ATTACKER");
+      expect((await withdraw("anna", "nope")).statusCode).toBe(404);
+      expect((await withdraw("anna", first)).statusCode).toBe(200);
+      // Recorded and handed to jobs, which applies it: the api decides no outcome.
+      expect(await prisma.battle.findUniqueOrThrow({ where: { id: first } })).toMatchObject({
+        withdrawn: true,
+        status: "OPEN",
+      });
+      expect(handedOver).toEqual([{ battleId: first, matchId }]);
+      expect(errorCode(await withdraw("anna", first))).toBe("BATTLE_ANSWERED");
+    });
+
+    it("is still shown to its two sides when it ends, however long ago it was declared", async () => {
+      const battleId = await besieged();
+      const { currentTurn } = await prisma.match.findUniqueOrThrow({ where: { id: matchId } });
+      // Declared three turns ago, fought for the last time in this one.
+      await prisma.battle.update({
+        where: { id: battleId },
+        data: { turn: currentTurn - 3, status: "RESOLVED", outcome: "WITHDRAWN", spoils: 12 },
+      });
+      await prisma.battleLock.deleteMany({ where: { battleId } });
+      const seen = (await state("anna")).battles.find((battle) => battle.id === battleId);
+      expect(seen).toMatchObject({ status: "RESOLVED", outcome: "WITHDRAWN", role: "attacker" });
+      // The spoils of a siege given up are the defender's.
+      expect(seen).not.toHaveProperty("spoils");
+      expect((await state("bruno")).battles.find((battle) => battle.id === battleId)).toMatchObject(
+        { spoils: 12 },
+      );
+      expect(
+        (await state("carla")).battles.find((battle) => battle.id === battleId),
+      ).toBeUndefined();
+    });
+
+    it("tells everyone the round and by how much the last went, and each side what the next costs", async () => {
+      const battleId = await besieged();
+      const seenBy = async (user: string) =>
+        (await state(user)).battles.find((battle) => battle.id === battleId) as unknown as Record<
+          string,
+          unknown
+        >;
+      for (const user of ["anna", "bruno", "carla"]) {
+        expect(await seenBy(user)).toMatchObject({
+          round: 2,
+          foughtThisTurn: true,
+          share: 0.52,
+          rounds: [{ round: 1, share: 0.52, result: "DRAW" }],
+        });
+      }
+      // The round awaited is fought with what is there now: half of it is what it costs.
+      const { territoryId } = await prisma.battleSource.findFirstOrThrow({ where: { battleId } });
+      const source = await prisma.territory.findUniqueOrThrow({ where: { id: territoryId } });
+      expect(await seenBy("anna")).toMatchObject({
+        attackForce: source.resources,
+        nextCost: costOf(source.resources, 50),
+      });
+      expect(await seenBy("bruno")).not.toHaveProperty("nextCost");
+      expect(await seenBy("carla")).not.toHaveProperty("attackForce");
+    });
+  });
+
   describe("what each side sees", () => {
     it("shows the battle to everyone, and to each side only its own numbers", async () => {
       await attack("anna", 3, [2]);
@@ -656,6 +778,12 @@ describe.skipIf(!url)("battles", () => {
             "targetName",
             "targetTerritoryId",
             "turn",
+            // The siege: rounds and by how much they went, never an amount.
+            "round",
+            "foughtThisTurn",
+            "withdrawn",
+            "share",
+            "rounds",
           ].sort(),
         );
         // The attacked territory is marked for everyone.

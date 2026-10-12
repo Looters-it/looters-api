@@ -276,6 +276,8 @@ export class BotService {
     const state = await this.matches.state(matchId, viewer);
     for (const battle of state.battles) {
       if (battle.status !== "OPEN" || battle.role !== "defender" || battle.response) continue;
+      // A siege waits for the next turn once this turn's round is fought.
+      if (battle.foughtThisTurn) continue;
       // It gives up a territory now and then, never its capital.
       const capital = state.empires.find((e) => e.id === state.me?.empireId)?.capitalTerritoryId;
       const surrender = battle.targetTerritoryId !== capital && this.random() < 0.2;

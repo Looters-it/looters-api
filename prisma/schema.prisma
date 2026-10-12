@@ -83,6 +83,8 @@ enum BattleOutcome {
   SURRENDER
   // Never fought: one of the two empires fell while it was open.
   CANCELLED
+  // The attacker gave up a siege.
+  WITHDRAWN
 }
 
 enum AllianceInviteStatus {
@@ -400,10 +402,20 @@ model Battle {
   spoils            Int?
   rollAttack        Float?
   rollDefense       Float?
+  // The round that is awaited: a round nobody wins clearly leaves the battle open, and
+  // the next one is fought in a later turn. Costs add up; forces and rolls are the last ones.
+  round             Int             @default(1)
+  // The turn of the last round fought: one round a turn.
+  foughtTurn        Int?
+  // Set by api when the attacker gives up a siege; applied by jobs.
+  withdrawn         Boolean         @default(false)
+  // The attacker's share of the two scores in the last round fought: by how much it went.
+  share             Float?
   createdAt         DateTime        @default(now())
   resolvedAt        DateTime?
   sources           BattleSource[]
   locks             BattleLock[]
+  rounds            BattleRound[]
 
   @@index([matchId, status])
   @@index([targetTerritoryId])
@@ -418,6 +430,24 @@ model BattleSource {
 
   @@id([battleId, territoryId])
   @@index([territoryId])
+}
+
+// One row per round fought. `result` is ATTACKER, DEFENDER or DRAW.
+model BattleRound {
+  battleId     String
+  battle       Battle @relation(fields: [battleId], references: [id], onDelete: Cascade)
+  round        Int
+  turn         Int
+  attackForce  Int
+  attackCost   Int
+  defenseForce Int
+  defenseCost  Int
+  rollAttack   Float
+  rollDefense  Float
+  share        Float
+  result       String
+
+  @@id([battleId, round])
 }
 
 // One row per territory involved in an open battle (target and every source),

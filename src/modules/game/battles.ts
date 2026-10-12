@@ -278,7 +278,7 @@ export class BattleService {
     viewer: AuthContext,
   ) {
     await this.prisma.$transaction(async (tx) => {
-      const { empire } = await acting(tx, matchId, viewer);
+      const { match, empire } = await acting(tx, matchId, viewer);
       const { count } = await tx.battle.updateMany({
         where: {
           id: battleId,
@@ -286,6 +286,10 @@ export class BattleService {
           defenderEmpireId: empire.id,
           status: "OPEN",
           response: null,
+          // A siege is fought one round a turn: until the next one it can only be given up.
+          ...(body.action === "DEFEND"
+            ? { OR: [{ foughtTurn: null }, { foughtTurn: { lt: match.currentTurn } }] }
+            : {}),
         },
         data: { response: body.action, respondedAt: new Date() },
       });
@@ -295,7 +299,50 @@ export class BattleService {
       if (battle.defenderEmpireId !== empire.id) {
         throw new AppError(403, "NOT_THE_DEFENDER", "Only the attacked empire can answer");
       }
+      if (battle.status === "OPEN" && battle.response === null) {
+        throw conflict("ROUND_FOUGHT", "This turn's round has been fought: the next is next turn");
+      }
       throw conflict("BATTLE_ANSWERED", "This battle has already been answered");
+    });
+
+    try {
+      await this.queue.requestResolution({ battleId, matchId });
+    } catch (error) {
+      this.onQueueError(error, battleId);
+    }
+    this.onChange(matchId, "battles");
+    return this.matches.state(matchId, viewer);
+  }
+
+  /**
+   * The attacker gives up a siege: a battle that went past its first round. Recorded
+   * here and applied by `jobs`, like the answer of the defender; if the hand-off is
+   * lost it is applied when the turn closes.
+   */
+  async withdraw(matchId: string, battleId: string, viewer: AuthContext) {
+    await this.prisma.$transaction(async (tx) => {
+      const { empire } = await acting(tx, matchId, viewer);
+      const { count } = await tx.battle.updateMany({
+        where: {
+          id: battleId,
+          matchId,
+          attackerEmpireId: empire.id,
+          status: "OPEN",
+          round: { gt: 1 },
+          withdrawn: false,
+        },
+        data: { withdrawn: true },
+      });
+      if (count === 1) return;
+      const battle = await tx.battle.findFirst({ where: { id: battleId, matchId } });
+      if (!battle) throw notFound("Battle");
+      if (battle.attackerEmpireId !== empire.id) {
+        throw new AppError(403, "NOT_THE_ATTACKER", "Only the attacking empire can withdraw");
+      }
+      if (battle.status === "OPEN" && battle.round === 1) {
+        throw conflict("NOT_A_SIEGE", "An attack can be withdrawn only once it became a siege");
+      }
+      throw conflict("BATTLE_ANSWERED", "This battle is already over");
     });
 
     try {

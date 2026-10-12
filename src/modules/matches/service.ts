@@ -867,10 +867,19 @@ export class MatchService {
     const battles = await this.prisma.battle.findMany({
       where: {
         matchId: id,
-        OR: [{ status: "OPEN" }, { status: "RESOLVED", turn: { gte: match.currentTurn - 1 } }],
+        // Just resolved: declared, or fought for the last time as a siege, in this turn or
+        // the one before.
+        OR: [
+          { status: "OPEN" },
+          { status: "RESOLVED", turn: { gte: match.currentTurn - 1 } },
+          { status: "RESOLVED", foughtTurn: { gte: match.currentTurn - 1 } },
+        ],
       },
       orderBy: { createdAt: "desc" },
-      include: { sources: { select: { territoryId: true, cost: true } } },
+      include: {
+        sources: { select: { territoryId: true, cost: true } },
+        rounds: { select: { round: true, turn: true, share: true, result: true } },
+      },
     });
     const territoryNames = new Map(
       (
@@ -1093,6 +1102,12 @@ export class MatchService {
             : mine?.id === battle.defenderEmpireId
               ? ("defender" as const)
               : null;
+        const siege = battle.status === "OPEN" && battle.round > 1;
+        const sourceIds = battle.sources.map((source) => source.territoryId);
+        const resourcesOf = (territoryIds: string[]) =>
+          territories
+            .filter((territory) => territoryIds.includes(territory.id))
+            .reduce((sum, territory) => sum + territory.resources, 0);
         return {
           id: battle.id,
           turn: battle.turn,
@@ -1107,26 +1122,55 @@ export class MatchService {
           // involves is marked on the map for everyone.
           fromTerritoryIds: battle.sources.map((source) => source.territoryId),
           fromNames: battle.sources.map((source) => territoryNames.get(source.territoryId) ?? ""),
+          // A siege: the round awaited, whether this turn's one was fought already, and
+          // how each round went. The attacker's share of the two scores tells by how much
+          // a round was won, and gives no amount away.
+          round: battle.round,
+          foughtThisTurn: battle.foughtTurn === match.currentTurn,
+          withdrawn: battle.withdrawn,
+          share: battle.share,
+          rounds: battle.rounds
+            .sort((a, b) => a.round - b.round)
+            .map((round) => ({
+              round: round.round,
+              turn: round.turn,
+              share: round.share,
+              result: round.result,
+            })),
           // Each side sees its own numbers and never the other's: forces, costs
           // and rolls of the opponent would give away its hidden resources.
+          // In a siege the round awaited is fought with what is on the territories when
+          // it comes: the numbers shown are those of now.
           ...(role === "attacker"
             ? {
                 attackCost: battle.attackCost,
-                attackForce: battle.attackForce,
+                attackForce: siege ? resourcesOf(sourceIds) : battle.attackForce,
+                ...(siege
+                  ? {
+                      nextCost: sourceIds.reduce(
+                        (sum, sourceId) => sum + costOf(resourcesOf([sourceId]), battle.attackPct),
+                        0,
+                      ),
+                    }
+                  : {}),
               }
             : {}),
           ...(role === "defender"
             ? {
                 response: battle.response,
-                defenseForce: battle.defenseForce,
-                defenseCost:
-                  battle.defenseCost ?? costOf(battle.defenseForce ?? 0, rules.defensePct),
+                defenseForce: siege ? resourcesOf([battle.targetTerritoryId]) : battle.defenseForce,
+                defenseCost: siege
+                  ? costOf(resourcesOf([battle.targetTerritoryId]), rules.defensePct)
+                  : (battle.defenseCost ?? costOf(battle.defenseForce ?? 0, rules.defensePct)),
               }
             : {}),
           // What a battle paid is told to who won it, and to nobody else: with it the
           // loser could work out what the winner had spent.
           ...(battle.spoils !== null &&
-          role === (battle.outcome === "DEFENDER_WON" ? "defender" : "attacker")
+          role ===
+            (battle.outcome === "DEFENDER_WON" || battle.outcome === "WITHDRAWN"
+              ? "defender"
+              : "attacker")
             ? { spoils: battle.spoils }
             : {}),
         };
