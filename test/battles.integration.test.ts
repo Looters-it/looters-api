@@ -257,6 +257,17 @@ describe.skipIf(!url)("battles", () => {
       expect(await shapes(null)).toEqual([]);
     });
 
+    it("gives a player the border of their empire as lines, and nobody else", async () => {
+      const outline = async (user: string | null) =>
+        (await as(user, "GET", `/api/matches/${matchId}/outline`)).json<{
+          geometry: { type: string; coordinates: unknown[] } | null;
+        }>().geometry;
+      const anna = await outline("anna");
+      expect(anna?.type).toMatch(/LineString$/);
+      expect(anna?.coordinates.length).toBeGreaterThan(0);
+      expect(await outline(null)).toBeNull();
+    });
+
     it("makes the turn longer when an attack is declared in its last seconds", async () => {
       // Straight to the app: the helper would set the clock of the turn by itself.
       const strike = async (target: number, from: number) =>

@@ -279,6 +279,29 @@ export class GameService {
   }
 
   /**
+   * The border of the viewer's empire: the edge of all it holds taken together, without
+   * the borders between its own territories. Drawn on the map so that a player tells
+   * what is theirs at a glance, whatever colours stand beside it.
+   */
+  async outline(matchId: string, viewer: Viewer) {
+    await this.matches.get(matchId, viewer);
+    const mine = viewer
+      ? await this.prisma.empire.findFirst({
+          where: { matchId, userId: viewer.user.id, status: "ACTIVE" },
+        })
+      : null;
+    if (!mine) return { geometry: null };
+    const rows = await this.prisma.$queryRaw<{ line: string | null }[]>`
+      SELECT ST_AsGeoJSON(ST_Boundary(ST_Union(u."geomSimple")), 4) AS line
+      FROM "Territory" t
+      JOIN "TerritoryUnit" tu ON tu."territoryId" = t.id
+      JOIN "GeoUnit" u ON u.id = tu."geoUnitId"
+      WHERE t."matchId" = ${matchId} AND t."ownerEmpireId" = ${mine.id}`;
+    const line = rows[0]?.line;
+    return { geometry: line ? (JSON.parse(line) as unknown) : null };
+  }
+
+  /**
    * The card of a municipality: who owns it, its neighbours and, for a
    * player looking at a free neighbour, how it can be annexed.
    */
