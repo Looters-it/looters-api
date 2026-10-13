@@ -1,5 +1,5 @@
 import { phaseOf } from "../../rules/phases.js";
-import type { PrismaClient } from "@prisma/client";
+import { Prisma, type PrismaClient } from "@prisma/client";
 import { z } from "zod";
 import type { AuthContext } from "../../auth/sessions.js";
 import { recordEvent } from "../../events/events.js";
@@ -18,7 +18,7 @@ import {
   isIsland,
   neighboursOf,
   onSea,
-  reachEdges,
+  reachEdgesFrom,
   reachersOf,
   placesOf,
 } from "./shared.js";
@@ -172,13 +172,13 @@ export class GameService {
       declared >= rules.attacksPerTurn
         ? []
         : await this.prisma.$queryRaw<{ id: string }[]>`
-      WITH edges AS (${reachEdges(matchId)}), sources AS (
+      WITH sources AS MATERIALIZED (
         SELECT tu."geoUnitId" AS unit
         FROM "Territory" t JOIN "TerritoryUnit" tu ON tu."territoryId" = t.id
         WHERE t."matchId" = ${matchId} AND t."ownerEmpireId" = ${mine.id} AND t.resources >= 1
           AND t.id <> ALL(${withEffect("NO_ATTACK_FROM")})
           AND NOT EXISTS (SELECT 1 FROM "BattleLock" l WHERE l."territoryId" = t.id)
-      )
+      ), edges AS (${reachEdgesFrom(matchId, Prisma.raw("sources"))})
       SELECT DISTINCT t.id
       FROM sources s
       JOIN edges e ON e.x = s.unit
@@ -216,11 +216,11 @@ export class GameService {
       payerIds.length === 0
         ? []
         : await this.prisma.$queryRaw<{ id: number }[]>`
-      WITH edges AS (${reachEdges(matchId)}), payers AS (
+      WITH payers AS MATERIALIZED (
         SELECT tu."geoUnitId" AS unit
         FROM "Territory" t JOIN "TerritoryUnit" tu ON tu."territoryId" = t.id
         WHERE t.id = ANY(${payerIds})
-      )
+      ), edges AS (${reachEdgesFrom(matchId, Prisma.raw("payers"))})
       SELECT DISTINCT tu."geoUnitId" AS id
       FROM payers p
       JOIN edges e ON e.x = p.unit

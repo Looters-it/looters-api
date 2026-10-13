@@ -49,10 +49,8 @@ export function neighboursOf(db: Tx | PrismaClient, matchId: string, territoryId
  * two municipalities; zero is no limit. Where a query asks what an empire can reach,
  * this is what it joins.
  */
-export const reachEdges = (matchId: string) => Prisma.sql`
-  SELECT "aId" AS x, "bId" AS y FROM "GeoAdjacency"
-  UNION ALL SELECT "bId", "aId" FROM "GeoAdjacency"
-  UNION ALL
+/** From the municipalities of a structure that reaches far, to those in its range. */
+const farEdges = (matchId: string) => Prisma.sql`
   SELECT harbour."geoUnitId", shore."geoUnitId"
   FROM "Structure" port
   JOIN "TerritoryUnit" harbour ON harbour."territoryId" = port."territoryId"
@@ -72,6 +70,26 @@ export const reachEdges = (matchId: string) => Prisma.sql`
     AND (reach.km = 0 OR ST_DistanceSphere(
       ST_MakePoint(quay."centroidLon", quay."centroidLat"),
       ST_MakePoint(far."centroidLon", far."centroidLat")) <= reach.km * 1000)`;
+
+export const reachEdges = (matchId: string) => Prisma.sql`
+  SELECT "aId" AS x, "bId" AS y FROM "GeoAdjacency"
+  UNION ALL SELECT "bId", "aId" FROM "GeoAdjacency"
+  UNION ALL ${farEdges(matchId)}`;
+
+/**
+ * The same edges, but only those that leave the municipalities of `from`: a relation
+ * with a column `unit`, defined before this one. What a whole empire reaches is asked
+ * for every few seconds, and reading every border of the world for it took seconds
+ * on a map of thousands of municipalities.
+ */
+export const reachEdgesFrom = (matchId: string, from: Prisma.Sql) => Prisma.sql`
+  SELECT a."aId" AS x, a."bId" AS y FROM "GeoAdjacency" a
+  WHERE a."aId" IN (SELECT unit FROM ${from})
+  UNION ALL
+  SELECT a."bId", a."aId" FROM "GeoAdjacency" a
+  WHERE a."bId" IN (SELECT unit FROM ${from})
+  UNION ALL ${farEdges(matchId)}
+    AND harbour."geoUnitId" IN (SELECT unit FROM ${from})`;
 
 /** A territory that another can be reached from, or that it reaches. */
 export interface Reached {
