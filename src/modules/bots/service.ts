@@ -209,29 +209,32 @@ export class BotService {
     // Away from the players, who need room to grow before they meet anyone, but not
     // nowhere: on the ring of free municipalities exactly four steps from what
     // a player holds, and touching no empire. On a map of thousands of municipalities,
-    // anywhere at random would be nowhere.
+    // anywhere at random would be nowhere. Only the borders of this match are read, and
+    // every step is worked out once: left to the planner, a map of thousands of
+    // municipalities took minutes and no bot was ever born.
     const candidates = (tier: Prisma.Sql) => this.prisma.$queryRaw<
       { geoUnitId: number; name: string }[]
     >`
-      WITH edges AS (
-        SELECT "aId" AS x, "bId" AS y FROM "GeoAdjacency"
-        UNION ALL SELECT "bId", "aId" FROM "GeoAdjacency"
-      ), units AS (
+      WITH units AS MATERIALIZED (
         SELECT tu."geoUnitId" AS id, t."ownerEmpireId" AS owner
         FROM "TerritoryUnit" tu JOIN "Territory" t ON t.id = tu."territoryId"
         WHERE tu."matchId" = ${matchId}
+      ), edges AS MATERIALIZED (
+        SELECT a."aId" AS x, a."bId" AS y FROM "GeoAdjacency" a JOIN units u ON u.id = a."aId"
+        UNION ALL
+        SELECT a."bId", a."aId" FROM "GeoAdjacency" a JOIN units u ON u.id = a."bId"
       ), owned AS (SELECT id FROM units WHERE owner IS NOT NULL),
-      beside AS (SELECT DISTINCT e.y AS id FROM edges e JOIN owned o ON o.id = e.x),
-      d0 AS (
+      beside AS MATERIALIZED (SELECT DISTINCT e.y AS id FROM edges e JOIN owned o ON o.id = e.x),
+      d0 AS MATERIALIZED (
         SELECT u.id FROM units u
         JOIN "Empire" e ON e.id = u.owner JOIN "User" p ON p.id = e."userId"
         WHERE NOT p."isBot"
       ),
-      d1 AS (SELECT DISTINCT e.y AS id FROM edges e JOIN d0 ON d0.id = e.x),
-      d2 AS (SELECT DISTINCT e.y AS id FROM edges e JOIN d1 ON d1.id = e.x),
-      d3 AS (SELECT DISTINCT e.y AS id FROM edges e JOIN d2 ON d2.id = e.x),
-      d4 AS (SELECT DISTINCT e.y AS id FROM edges e JOIN d3 ON d3.id = e.x),
-      close AS (
+      d1 AS MATERIALIZED (SELECT DISTINCT e.y AS id FROM edges e JOIN d0 ON d0.id = e.x),
+      d2 AS MATERIALIZED (SELECT DISTINCT e.y AS id FROM edges e JOIN d1 ON d1.id = e.x),
+      d3 AS MATERIALIZED (SELECT DISTINCT e.y AS id FROM edges e JOIN d2 ON d2.id = e.x),
+      d4 AS MATERIALIZED (SELECT DISTINCT e.y AS id FROM edges e JOIN d3 ON d3.id = e.x),
+      close AS MATERIALIZED (
         SELECT id FROM d0 UNION SELECT id FROM d1 UNION SELECT id FROM d2 UNION SELECT id FROM d3
       )
       SELECT u.id AS "geoUnitId", g.name
