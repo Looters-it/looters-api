@@ -178,7 +178,7 @@ export class GameService {
         WHERE t."matchId" = ${matchId} AND t."ownerEmpireId" = ${mine.id} AND t.resources >= 1
           AND t.id <> ALL(${withEffect("NO_ATTACK_FROM")})
           AND NOT EXISTS (SELECT 1 FROM "BattleLock" l WHERE l."territoryId" = t.id)
-      ), edges AS (${reachEdgesFrom(matchId, Prisma.raw("sources"))})
+      ), edges AS MATERIALIZED (${reachEdgesFrom(matchId, Prisma.raw("sources"))})
       SELECT DISTINCT t.id
       FROM sources s
       JOIN edges e ON e.x = s.unit
@@ -220,7 +220,7 @@ export class GameService {
         SELECT tu."geoUnitId" AS unit
         FROM "Territory" t JOIN "TerritoryUnit" tu ON tu."territoryId" = t.id
         WHERE t.id = ANY(${payerIds})
-      ), edges AS (${reachEdgesFrom(matchId, Prisma.raw("payers"))})
+      ), edges AS MATERIALIZED (${reachEdgesFrom(matchId, Prisma.raw("payers"))})
       SELECT DISTINCT tu."geoUnitId" AS id
       FROM payers p
       JOIN edges e ON e.x = p.unit
