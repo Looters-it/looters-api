@@ -127,6 +127,20 @@ describe.skipIf(!url)("bots", () => {
     expect(await bots()).toHaveLength(2);
   });
 
+  it("founds the bots of the start later, when the first turn went by without them", async () => {
+    const match = await prisma.match.findUniqueOrThrow({ where: { id: matchId } });
+    // The server was down on the first turn: the match is at its third, with no bot.
+    await prisma.match.update({
+      where: { id: matchId },
+      data: {
+        currentTurn: 3,
+        config: { ...(match.config as object), botsAtStart: 2, botSpawnChancePct: 0 },
+      },
+    });
+    await app.bots.playTurn(matchId);
+    expect(await bots()).toHaveLength(2);
+  });
+
   it("takes a pause after every move, so that the map changes one move at a time", async () => {
     const pauses: number[] = [];
     app.bots.pause = (ms) => {

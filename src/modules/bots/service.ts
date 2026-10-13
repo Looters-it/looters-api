@@ -114,7 +114,8 @@ export class BotService {
   /**
    * What happens when a turn of a match begins: perhaps a new bot founds an
    * empire on a free municipality, then every bot plays its turn. The bots that
-   * a match has from its start are founded on its first turn.
+   * a match has from its start are founded on its first turn, or on the first one
+   * the server is there for.
    *
    * Nothing happens all at once: the moves are spread over the first part of the
    * turn, one after the other with a pause between them.
@@ -125,10 +126,13 @@ export class BotService {
     const { match, rules } = running;
     const turn = match.currentTurn;
     try {
-      if (turn === 1) {
-        const there = await this.prisma.empire.count({
-          where: { matchId, user: { isBot: true } },
-        });
+      // Every bot ever founded counts, fallen ones too: the bots of the start are owed
+      // once, on the first turn that is played, which is not the first of the match if
+      // the server was down then.
+      const there = await this.prisma.empire.count({
+        where: { matchId, user: { isBot: true } },
+      });
+      if (there < rules.botsAtStart) {
         for (let missing = rules.botsAtStart - there; missing > 0; missing--) {
           if (!(await this.maybeSpawn(matchId, true))) break;
           await this.pause(BIRTH_PAUSE_MS);
