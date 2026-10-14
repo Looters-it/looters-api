@@ -45,6 +45,12 @@ const matchRulesBase = z.strictObject({
   attackMaxPct: pct.default(100),
   defensePct: pct.default(50),
   surrenderRefundPct: pct.default(50),
+  // Share of what is on a territory given up that its owner takes away with them: to a
+  // territory of theirs bordering it, or else to their capital.
+  retreatPct: pct.default(100),
+  // What every municipality of a territory adds to its defence, free: a territory left
+  // with nothing on it still has a chance.
+  garrisonPerUnit: count.default(10),
   // Share of what the two sides spent on a battle that goes to whoever wins it.
   battleSpoilsPct: pct.default(70),
   // By how much one side must beat the other for a round to end the battle. Below it
